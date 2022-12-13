@@ -2,9 +2,10 @@ import logging
 from typing import List, Optional, Union
 
 import torch
+from torch.utils.data import ConcatDataset
 
 from nequip.nn import RescaleOutput, GraphModuleMixin, PerSpeciesScaleShift
-from nequip.data import AtomicDataDict, AtomicDataset
+from nequip.data import AtomicDataDict
 from nequip.data.transforms import TypeMapper
 
 
@@ -12,7 +13,7 @@ RESCALE_THRESHOLD = 1e-6
 
 
 def RescaleEnergyEtc(
-    model: GraphModuleMixin, config, dataset: AtomicDataset, initialize: bool
+    model: GraphModuleMixin, config, dataset: ConcatDataset, initialize: bool
 ):
     return GlobalRescale(
         model=model,
@@ -24,9 +25,9 @@ def RescaleEnergyEtc(
         if AtomicDataDict.FORCE_KEY in model.irreps_out
         else f"dataset_{AtomicDataDict.TOTAL_ENERGY_KEY}_std",
         default_shift=None,
-        default_scale_keys=AtomicDataDict.ALL_ENERGY_KEYS,
+        default_scale_keys=[AtomicDataDict.FORCE_KEY], # AtomicDataDict.ALL_ENERGY_KEYS,
         default_shift_keys=[AtomicDataDict.TOTAL_ENERGY_KEY],
-        default_related_scale_keys=[AtomicDataDict.PER_ATOM_ENERGY_KEY],
+        default_related_scale_keys=[], # [AtomicDataDict.PER_ATOM_ENERGY_KEY],
         default_related_shift_keys=[],
     )
 
@@ -34,11 +35,11 @@ def RescaleEnergyEtc(
 def GlobalRescale(
     model: GraphModuleMixin,
     config,
-    dataset: AtomicDataset,
+    dataset: ConcatDataset,
     initialize: bool,
     module_prefix: str,
     default_scale: Union[str, float, list],
-    default_shift: Union[str, float, list],
+    default_shift: Optional[Union[str, float, list]],
     default_scale_keys: list,
     default_shift_keys: list,
     default_related_scale_keys: list,
@@ -83,11 +84,11 @@ def GlobalRescale(
 
         if isinstance(global_scale, str):
             s = global_scale
-            global_scale = computed_stats[str_names.index(global_scale)]
+            global_scale = torch.stack([cs[str_names.index(global_scale)] for cs in computed_stats]).mean().item()
             logging.info(f"Replace string {s} to {global_scale}")
         if isinstance(global_shift, str):
             s = global_shift
-            global_shift = computed_stats[str_names.index(global_shift)]
+            global_shift = [cs[str_names.index(global_shift)] for cs in computed_stats]
             logging.info(f"Replace string {s} to {global_shift}")
 
         if global_scale is not None and global_scale < RESCALE_THRESHOLD:
@@ -117,11 +118,11 @@ def GlobalRescale(
         model=model,
         scale_keys=[k for k in default_scale_keys if k in model.irreps_out],
         scale_by=global_scale,
-        shift_keys=[k for k in default_shift_keys if k in model.irreps_out],
-        shift_by=global_shift,
+        # shift_keys=[k for k in default_shift_keys if k in model.irreps_out],
+        # shift_by=global_shift,
         related_scale_keys=default_related_scale_keys,
-        related_shift_keys=default_related_shift_keys,
-        shift_trainable=config.get(f"{module_prefix}_shift_trainable", False),
+        # related_shift_keys=default_related_shift_keys,
+        # shift_trainable=config.get(f"{module_prefix}_shift_trainable", False),
         scale_trainable=config.get(f"{module_prefix}_scale_trainable", False),
     )
 
@@ -129,7 +130,7 @@ def GlobalRescale(
 def PerSpeciesRescale(
     model: GraphModuleMixin,
     config,
-    dataset: AtomicDataset,
+    dataset: ConcatDataset,
     initialize: bool,
 ):
     """Add global rescaling for energy(-based quantities).
@@ -208,34 +209,35 @@ def PerSpeciesRescale(
 
         if isinstance(scales, str):
             s = scales
-            scales = computed_stats[str_names.index(scales)].squeeze(-1)  # energy is 1D
+            scales = [cs[str_names.index(scales)].squeeze(-1) for cs in computed_stats] # energy is 1D
             logging.info(f"Replace string {s} to {scales}")
         elif isinstance(scales, (list, float)):
             scales = torch.as_tensor(scales)
 
         if isinstance(shifts, str):
             s = shifts
-            shifts = computed_stats[str_names.index(shifts)].squeeze(-1)  # energy is 1D
+            shifts = [cs[str_names.index(shifts)].squeeze(-1) for cs in computed_stats] # energy is 1D
             logging.info(f"Replace string {s} to {shifts}")
         elif isinstance(shifts, (list, float)):
             shifts = torch.as_tensor(shifts)
 
-        if scales is not None and torch.min(scales) < RESCALE_THRESHOLD:
+        if scales is not None and any(torch.min(s) < RESCALE_THRESHOLD for s in scales):
             raise ValueError(
                 f"Per species energy scaling was very low: {scales}. Maybe try setting {module_prefix}_scales = 1."
             )
 
-        logging.info(
-            f"Atomic outputs are scaled by: {TypeMapper.format(scales, config.type_names)}, shifted by {TypeMapper.format(shifts, config.type_names)}."
-        )
+        for i, (sc, sh) in enumerate(zip(scales, shifts)):
+            logging.info(
+                f"Atomic outputs on dataset {i} are scaled by: {TypeMapper.format(sc, config.type_names)}, shifted by {TypeMapper.format(sh, config.type_names)}."
+            )
 
     else:
         # Put dummy values
         # the real ones will be loaded from the state dict later
         # note that the state dict includes buffers,
         # so this is fine regardless of whether its trainable.
-        scales = 1.0 if scales is not None else None
-        shifts = 0.0 if shifts is not None else None
+        scales = [torch.tensor(1.0), torch.tensor(1.0)] if scales is not None else None
+        shifts = [torch.tensor(0.0), torch.tensor(0.0)] if shifts is not None else None
         # values correctly scaled according to where the come from
         # will be brought from the state dict later,
         # so what you set this to doesnt matter:
@@ -322,10 +324,13 @@ def _compute_stats(
                     input_kwargs[field + stat_mode] = kwargs[field]
         tuple_ids += [tuple_id_map[stat]]
 
-    values = dataset.statistics(
-        fields=stat_fields,
-        modes=stat_modes,
-        stride=stride,
-        kwargs=input_kwargs,
-    )
-    return [values[idx][tuple_ids[i]] for i, idx in enumerate(ids)]
+    dataset_values = []
+    for _dataset in dataset.datasets:
+        values = _dataset.statistics(
+            fields=stat_fields,
+            modes=stat_modes,
+            stride=stride,
+            kwargs=input_kwargs,
+        )
+        dataset_values.append([values[idx][tuple_ids[i]] for i, idx in enumerate(ids)])
+    return dataset_values

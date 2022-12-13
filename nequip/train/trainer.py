@@ -25,8 +25,9 @@ else:
 import numpy as np
 import torch
 from torch_ema import ExponentialMovingAverage
+from torch.utils.data import ConcatDataset
 
-from nequip.data import DataLoader, AtomicData, AtomicDataDict, AtomicDataset
+from nequip.data import DataLoader, AtomicData, AtomicDataDict
 from nequip.utils import (
     Output,
     Config,
@@ -239,11 +240,11 @@ class Trainer:
         batch_size: int = 5,
         validation_batch_size: int = 5,
         shuffle: bool = True,
-        n_train: Optional[int] = None,
-        n_val: Optional[int] = None,
+        n_train: Optional[Union[List[int], int]] = None,
+        n_val: Optional[Union[List[int], int]] = None,
         dataloader_num_workers: int = 0,
-        train_idcs: Optional[list] = None,
-        val_idcs: Optional[list] = None,
+        train_idcs: Optional[Union[list, list[list]]] = None,
+        val_idcs: Optional[Union[list, list[list]]] = None,
         train_val_split: str = "random",
         init_callbacks: list = [],
         end_of_epoch_callbacks: list = [],
@@ -347,6 +348,10 @@ class Trainer:
         if kwargs.get("_override_allow_truth_label_inputs", False):
             # needed for unit testing models
             self._remove_from_model_input = set()
+        
+        # initialize n_train and n_val
+        self.n_train = n_train if isinstance(n_train, list) or n_train is None else [n_train]
+        self.n_val = n_val if isinstance(n_val, list) or n_val is None else [n_val]
 
         # load all callbacks
         self._init_callbacks = [load_callable(callback) for callback in init_callbacks]
@@ -693,7 +698,8 @@ class Trainer:
             model_state_dict = torch.load(
                 traindir + "/" + model_name, map_location=device
             )
-            model.load_state_dict(model_state_dict)
+            # model_state_dict.pop('model.func.per_species_rescale.shifts')
+            model.load_state_dict(model_state_dict), #strict=False)
 
         return model, config
 
@@ -959,7 +965,7 @@ class Trainer:
         # append details from metrics
         metrics, skip_keys = self.metrics.flatten_metrics(
             metrics=self.batch_metrics,
-            type_names=self.dataset_train.type_mapper.type_names,
+            type_names=self.dataset_train.datasets[0].type_mapper.type_names,
         )
         for key, value in metrics.items():
 
@@ -1084,7 +1090,7 @@ class Trainer:
 
             met, skip_keys = self.metrics.flatten_metrics(
                 metrics=self.metrics_dict[category],
-                type_names=self.dataset_train.type_mapper.type_names,
+                type_names=self.dataset_train.datasets[0].type_mapper.type_names,
             )
 
             # append details from loss
@@ -1140,8 +1146,8 @@ class Trainer:
 
     def set_dataset(
         self,
-        dataset: AtomicDataset,
-        validation_dataset: Optional[AtomicDataset] = None,
+        dataset: ConcatDataset,
+        validation_dataset: Optional[ConcatDataset] = None,
     ) -> None:
         """Set the dataset(s) used by this trainer.
 
@@ -1153,11 +1159,31 @@ class Trainer:
         `validation_dataset` is provided, it will be used.
         """
 
+        assert len(self.n_train) == len(dataset.datasets)
+        assert len(self.n_val) == len(dataset.datasets)
+
         if self.train_idcs is None or self.val_idcs is None:
-            if validation_dataset is None:
-                # Sample both from `dataset`:
-                total_n = len(dataset)
-                if (self.n_train + self.n_val) > total_n:
+            self.train_idcs, self.val_idcs = [], []
+            # Sample both from `dataset`:
+            if validation_dataset is not None:
+                for _validation_dataset, n_train, n_val in zip(validation_dataset.datasets, self.n_train, self.n_val):
+                    if n_val > len(_validation_dataset):
+                        raise ValueError("Not enough data in dataset for requested n_val")
+                    if self.train_val_split == "random":
+                        idcs = torch.randperm(
+                            len(validation_dataset), generator=self.dataset_rng
+                        )[: self.n_val]
+                    elif self.train_val_split == "sequential":
+                        idcs = torch.arange(self.n_val)
+                    else:
+                        raise NotImplementedError(
+                            f"splitting mode {self.train_val_split} not implemented"
+                        )
+                    self.val_idcs.append(idcs[n_train : n_train + n_val])
+
+            for _dataset, n_train, n_val in zip(dataset.datasets, self.n_train, self.n_val):
+                total_n = len(_dataset)
+                if (n_train + n_val) > total_n:
                     raise ValueError(
                         "too little data for training and validation. please reduce n_train and n_val"
                     )
@@ -1171,34 +1197,22 @@ class Trainer:
                         f"splitting mode {self.train_val_split} not implemented"
                     )
 
-                self.train_idcs = idcs[: self.n_train]
-                self.val_idcs = idcs[self.n_train : self.n_train + self.n_val]
-            else:
-                if self.n_train > len(dataset):
-                    raise ValueError("Not enough data in dataset for requested n_train")
-                if self.n_val > len(validation_dataset):
-                    raise ValueError("Not enough data in dataset for requested n_train")
-                if self.train_val_split == "random":
-                    self.train_idcs = torch.randperm(
-                        len(dataset), generator=self.dataset_rng
-                    )[: self.n_train]
-                    self.val_idcs = torch.randperm(
-                        len(validation_dataset), generator=self.dataset_rng
-                    )[: self.n_val]
-                elif self.train_val_split == "sequential":
-                    self.train_idcs = torch.arange(self.n_train)
-                    self.val_idcs = torch.arange(self.n_val)
-                else:
-                    raise NotImplementedError(
-                        f"splitting mode {self.train_val_split} not implemented"
-                    )
-
-        if validation_dataset is None:
-            validation_dataset = dataset
+                self.train_idcs.append(idcs[: n_train])
+                if validation_dataset is None:
+                    self.val_idcs.append(idcs[n_train : n_train + n_val])
+            if validation_dataset is None:
+                validation_dataset = dataset
 
         # torch_geometric datasets inherantly support subsets using `index_select`
-        self.dataset_train = dataset.index_select(self.train_idcs)
-        self.dataset_val = validation_dataset.index_select(self.val_idcs)
+        indexed_datasets_train = []
+        for _dataset, train_idcs in zip(dataset.datasets, self.train_idcs):
+            indexed_datasets_train.append(_dataset.index_select(train_idcs))
+        self.dataset_train = ConcatDataset(indexed_datasets_train)
+        
+        indexed_datasets_val = []
+        for _dataset, val_idcs in zip(validation_dataset.datasets, self.val_idcs):
+            indexed_datasets_val.append(_dataset.index_select(val_idcs))
+        self.dataset_val = ConcatDataset(indexed_datasets_val)
 
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation

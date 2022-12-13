@@ -3,6 +3,7 @@ from typing import Dict, Tuple, Callable, Any, Sequence, Union, Mapping, Optiona
 from collections import OrderedDict
 
 import torch
+from torch.nn.modules.module import T
 
 from e3nn import o3
 
@@ -15,6 +16,8 @@ class GraphModuleMixin:
 
     All such classes should call ``_init_irreps`` in their ``__init__`` functions with information on the data fields they expect, require, and produce, as well as their corresponding irreps.
     """
+
+    production: bool
 
     def _init_irreps(
         self,
@@ -77,6 +80,7 @@ class GraphModuleMixin:
         new_out = irreps_in.copy()
         new_out.update(irreps_out)
         self.irreps_out = new_out
+        self.production = False
 
     def _add_independent_irreps(self, irreps: Dict[str, Any]):
         """
@@ -117,6 +121,31 @@ class GraphModuleMixin:
                 }
             )
         return out
+    
+    def prod(self: T, mode: bool = True) -> T:
+        r"""Sets the module in training mode.
+
+        This has any effect only on certain modules. See documentations of
+        particular modules for details of their behaviors in training/evaluation
+        mode, if they are affected, e.g. :class:`Dropout`, :class:`BatchNorm`,
+        etc.
+
+        Args:
+            mode (bool): whether to set training mode (``True``) or evaluation
+                         mode (``False``). Default: ``True``.
+
+        Returns:
+            Module: self
+        """
+        if not isinstance(mode, bool):
+            raise ValueError("training mode is expected to be boolean")
+        self.production = mode
+        for module in self.children():
+            try:
+                module.prod(mode)
+            except:
+                pass
+        return self
 
 
 class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):

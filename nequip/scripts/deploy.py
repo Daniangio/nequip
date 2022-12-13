@@ -22,6 +22,7 @@ from e3nn.util.jit import script
 
 from nequip.model import model_from_config
 from nequip.train import Trainer
+from nequip.data import AtomicData
 from nequip.utils import Config
 from nequip.utils.versions import check_code_version, get_config_code_versions
 from nequip.scripts.train import default_config
@@ -146,6 +147,11 @@ def main(args=None):
         help="Path to a deployed model file.",
         type=pathlib.Path,
     )
+    info_parser.add_argument(
+        "--train-dir",
+        help="Path to a working directory from a training session to deploy.",
+        type=pathlib.Path,
+    )
 
     build_parser = subparsers.add_parser("build", help="Build a deployment model")
     build_parser.add_argument(
@@ -169,13 +175,45 @@ def main(args=None):
     logging.basicConfig(level=getattr(logging, args.verbose.upper()))
 
     if args.command == "info":
-        model, metadata = load_deployed_model(args.model_path, set_global_options=False)
+        config = Config.from_file(str(args.train_dir / "config.yaml"))
+        model, metadata = load_deployed_model(args.model_path, device=config['device'], set_global_options=False)
+        
+        from nequip.data import dataset_from_config
+        dataset = dataset_from_config(config, prefix="dataset")
+        dl_kwargs = dict(
+            exclude_keys=[],
+            num_workers=0,
+            # keep stuff around in memory
+            persistent_workers=(
+                False
+            ),
+            # PyTorch recommends this for GPU since it makes copies much faster
+            pin_memory=(True),
+            # avoid getting stuck
+            timeout=(0),
+            # use the right randomness
+        )
+        from nequip.data import DataLoader
+        dl_train = DataLoader(
+            dataset=dataset,
+            shuffle=False,  # training should shuffle
+            batch_size=2,
+            **dl_kwargs,
+        )
+        model.eval()
+        for data in dl_train:
+            data = data.to(config['device'])
+            input_data = AtomicData.to_AtomicDataDict(data)
+            out = model(input_data)
+            print(out['total_energy'])
+            break
+
         del model
         config = metadata.pop(CONFIG_KEY)
         metadata_str = "\n".join("  %s: %s" % e for e in metadata.items())
         logging.info(f"Loaded TorchScript model with metadata:\n{metadata_str}\n")
         logging.info("Model was built with config:")
-        print(config)
+        # print(config)
 
     elif args.command == "build":
         if args.model and args.train_dir:
@@ -203,6 +241,7 @@ def main(args=None):
             raise AssertionError
 
         # -- compile --
+        model.prod()
         model = _compile_for_deploy(model)
         logging.info("Compiled & optimized model.")
 

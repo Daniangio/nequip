@@ -141,8 +141,18 @@ def main(args=None, running_as_script: bool = True):
             trainer = torch.load(
                 str(args.train_dir / "trainer.pth"), map_location="cpu"
             )
-            train_idcs = set(trainer["train_idcs"].tolist())
-            val_idcs = set(trainer["val_idcs"].tolist())
+            train_idcs = []
+            dataset_offset = 0
+            for tr_idcs in trainer["train_idcs"]:
+                train_idcs.extend([tr_idx + dataset_offset for tr_idx in tr_idcs.tolist()])
+                dataset_offset += len(tr_idcs)
+            train_idcs = set(train_idcs)
+            val_idcs = []
+            dataset_offset = 0
+            for v_idcs in trainer["val_idcs"]:
+                val_idcs.extend([v_idx + dataset_offset for v_idx in v_idcs.tolist()])
+                dataset_offset += len(v_idcs)
+            val_idcs = set(val_idcs)
         else:
             train_idcs = val_idcs = None
     # update
@@ -399,7 +409,7 @@ def main(args=None, running_as_script: bool = True):
                             f"{k} = {v:4.4f}"
                             for k, v in metrics.flatten_metrics(
                                 metrics.current_result(),
-                                type_names=dataset.type_mapper.type_names,
+                                type_names=dataset.datasets[0].type_mapper.type_names,
                             )[0].items()
                         )
                     )
@@ -418,7 +428,7 @@ def main(args=None, running_as_script: bool = True):
                 f"{k:>20s} = {v:< 20f}"
                 for k, v in metrics.flatten_metrics(
                     metrics.current_result(),
-                    type_names=dataset.type_mapper.type_names,
+                    type_names=dataset.datasets[0].type_mapper.type_names,
                 )[0].items()
             )
         )

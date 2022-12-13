@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+from torch.utils.data import ConcatDataset
 
 from nequip.utils import Config
 from nequip.data import AtomicDataset, AtomicDataDict
@@ -23,7 +24,7 @@ def _add_avg_num_neighbors_helper(data):
 def add_avg_num_neighbors(
     config: Config,
     initialize: bool,
-    dataset: Optional[AtomicDataset] = None,
+    dataset: Optional[ConcatDataset] = None,
 ) -> Optional[float]:
     # Compute avg_num_neighbors
     annkey: str = "avg_num_neighbors"
@@ -37,7 +38,7 @@ def add_avg_num_neighbors(
             raise ValueError(
                 "When avg_num_neighbors = auto, the dataset is required to build+initialize a model"
             )
-        ann, var_nn = dataset.statistics(
+        ann, var_nn = dataset.datasets[0].statistics(
             fields=[_add_avg_num_neighbors_helper],
             modes=["mean_std"],
             stride=config.get("dataset_statistics_stride", 1),

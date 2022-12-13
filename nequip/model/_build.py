@@ -29,7 +29,7 @@ def model_from_config(
     # Pre-process config
     type_mapper = None
     if dataset is not None:
-        type_mapper = dataset.type_mapper
+        type_mapper = dataset.datasets[0].type_mapper
     else:
         try:
             type_mapper, _ = instantiate(TypeMapper, all_args=config)

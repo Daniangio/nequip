@@ -48,6 +48,7 @@ EDGE_EMBEDDING_KEY: Final[str] = "edge_embedding"
 NODE_FEATURES_KEY: Final[str] = "node_features"
 NODE_ATTRS_KEY: Final[str] = "node_attrs"
 
+DATASET_INDEX_KEY: Final[str] = "dataset_idx"
 PER_ATOM_ENERGY_KEY: Final[str] = "atomic_energy"
 TOTAL_ENERGY_KEY: Final[str] = "total_energy"
 FORCE_KEY: Final[str] = "forces"

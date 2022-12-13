@@ -126,6 +126,7 @@ class AtomicInMemoryDataset(AtomicDataset):
     def __init__(
         self,
         root: str,
+        dataset_idx: int,
         file_name: Optional[str] = None,
         url: Optional[str] = None,
         force_fixed_keys: List[str] = [],
@@ -135,6 +136,7 @@ class AtomicInMemoryDataset(AtomicDataset):
     ):
         # TO DO, this may be simplified
         # See if a subclass defines some inputs
+        self.dataset_idx = dataset_idx
         self.file_name = (
             getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
         )
@@ -677,6 +679,7 @@ class NpzDataset(AtomicInMemoryDataset):
     def __init__(
         self,
         root: str,
+        dataset_idx: int,
         key_mapping: Dict[str, str] = {
             "positions": AtomicDataDict.POSITIONS_KEY,
             "energy": AtomicDataDict.TOTAL_ENERGY_KEY,
@@ -699,6 +702,7 @@ class NpzDataset(AtomicInMemoryDataset):
         self.include_keys = include_keys
 
         super().__init__(
+            dataset_idx=dataset_idx,
             file_name=file_name,
             url=url,
             root=root,
@@ -743,6 +747,7 @@ class NpzDataset(AtomicInMemoryDataset):
         fixed_fields = {
             k: v for k, v in mapped.items() if k in self.npz_fixed_field_keys
         }
+        fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = np.array(self.dataset_idx)
         return fields, fixed_fields
 
 
@@ -852,6 +857,7 @@ class ASEDataset(AtomicInMemoryDataset):
     def __init__(
         self,
         root: str,
+        dataset_idx: int,
         ase_args: dict = {},
         file_name: Optional[str] = None,
         url: Optional[str] = None,
@@ -872,6 +878,7 @@ class ASEDataset(AtomicInMemoryDataset):
         self.key_mapping = key_mapping
 
         super().__init__(
+            dataset_idx=dataset_idx,
             file_name=file_name,
             url=url,
             root=root,
@@ -932,6 +939,7 @@ class ASEDataset(AtomicInMemoryDataset):
         kwargs = dict(
             include_keys=self.include_keys,
             key_mapping=self.key_mapping,
+            dataset_idx=self.dataset_idx
         )
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
         kwargs.update(self.extra_fixed_fields)
