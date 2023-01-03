@@ -1,10 +1,4 @@
-""" Nequip.train.trainer
-
-Todo:
-
-isolate the loss function from the training procedure
-enable wandb resume
-make an interface with ray
+""" Nequip.train.trainer_delta
 
 """
 import sys
@@ -27,7 +21,7 @@ import torch
 from torch_ema import ExponentialMovingAverage
 from torch.utils.data import ConcatDataset
 
-from nequip.data import DataLoader, AtomicData, AtomicDataDict
+from nequip.data import DataLoader, AtomicData, AtomicDataDict, ReferenceConcatDataset
 from nequip.utils import (
     Output,
     Config,
@@ -50,8 +44,8 @@ from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
 
-class Trainer:
-    """Class to train a model to minimize forces
+class TrainerDelta:
+    """Class to train a model to learn energy up to a constant and minimize forces
 
     This class isolate the logging and callback functions from the training procedure.
     The class instance can be easily save/load for restart;
@@ -63,7 +57,7 @@ class Trainer:
     To start a training.
 
     '''python
-    trainer = Trainer(model, learning_rate=1e-2)
+    trainer = TrainerDelta(model, learning_rate=1e-2)
     trainer.set_dataset(dataset)
     trainer.train()
     '''
@@ -450,8 +444,8 @@ class Trainer:
     def init_keys(self):
         return [
             key
-            for key in list(inspect.signature(Trainer.__init__).parameters.keys())
-            if key not in (["self", "kwargs", "model"] + Trainer.object_keys)
+            for key in list(inspect.signature(TrainerDelta.__init__).parameters.keys())
+            if key not in (["self", "kwargs", "model"] + TrainerDelta.object_keys)
         ]
 
     @property
@@ -497,7 +491,7 @@ class Trainer:
 
         if state_dict:
             dictionary["state_dict"] = {}
-            for key in Trainer.object_keys:
+            for key in TrainerDelta.object_keys:
                 item = getattr(self, key, None)
                 if item is not None:
                     dictionary["state_dict"][key] = item.state_dict()
@@ -623,7 +617,7 @@ class Trainer:
             else:
                 raise AttributeError("model weights & bias are not saved")
 
-            model, _ = Trainer.load_model_from_training_session(
+            model, _ = TrainerDelta.load_model_from_training_session(
                 traindir=load_path.parent,
                 model_name=load_path.name,
                 config_dictionary=dictionary,
@@ -638,7 +632,7 @@ class Trainer:
 
         if state_dict is not None and trainer.model is not None:
             logging.debug("Reload optimizer and scheduler states")
-            for key in Trainer.object_keys:
+            for key in TrainerDelta.object_keys:
                 item = getattr(trainer, key, None)
                 if item is not None:
                     item.load_state_dict(state_dict[key])
@@ -789,7 +783,7 @@ class Trainer:
         self.save()
         finish_all_writes()
 
-    def batch_step(self, data, validation=False):
+    def batch_step(self, data, ref_data, validation=False):
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
 
@@ -799,16 +793,19 @@ class Trainer:
             self.model.train()
 
         # Do any target rescaling
-        data = data.to(self.torch_device)
-        data = AtomicData.to_AtomicDataDict(data)
+        data, ref_data = data.to(self.torch_device), ref_data.to(self.torch_device)
+        data, ref_data = AtomicData.to_AtomicDataDict(data), AtomicData.to_AtomicDataDict(ref_data)
+        dataset_idcs = data[AtomicDataDict.DATASET_INDEX_KEY]
 
         data_unscaled = data
+        ref_data_unscaled = ref_data
         for layer in self.rescale_layers:
             # This means that self.model is RescaleOutputs
             # this will normalize the targets
             # in validation (eval mode), it does nothing
             # in train mode, if normalizes the targets
             data_unscaled = layer.unscale(data_unscaled)
+            ref_data_unscaled = layer.unscale(ref_data_unscaled)
 
         # Run model
         # We make a shallow copy of the input dict in case the model modifies it
@@ -819,6 +816,19 @@ class Trainer:
         }
         out = self.model(input_data)
         del input_data
+
+        ref_input_data = {
+            k: v
+            for k, v in ref_data_unscaled.items()
+            if k not in self._remove_from_model_input
+        }
+        ref_out = self.model(ref_input_data)
+        del ref_input_data
+
+        # Apply deltas over specified output keys
+        for key in self.loss.delta_keys:
+            out[key] -= ref_out[key][dataset_idcs]
+            data_unscaled[key] -= ref_data_unscaled[key][dataset_idcs]
 
         # If we're in evaluation mode (i.e. validation), then
         # data_unscaled's target prop is unnormalized, and out's has been rescaled to be in the same units
@@ -899,14 +909,18 @@ class Trainer:
     def epoch_step(self):
 
         dataloaders = {TRAIN: self.dl_train, VALIDATION: self.dl_val}
+        ref_dataloaders = {TRAIN: self.dl_ref_train, VALIDATION: self.dl_ref_val}
         categories = [TRAIN, VALIDATION] if self.iepoch >= 0 else [VALIDATION]
         dataloaders = [
             dataloaders[c] for c in categories
+        ]
+        ref_dataloaders = [
+            ref_dataloaders[c] for c in categories
         ]  # get the right dataloaders for the catagories we actually run
         self.metrics_dict = {}
         self.loss_dict = {}
 
-        for category, dataset in zip(categories, dataloaders):
+        for category, dataset, ref_dataset in zip(categories, dataloaders, ref_dataloaders):
             if category == VALIDATION and self.use_ema:
                 cm = self.ema.average_parameters()
             else:
@@ -915,9 +929,10 @@ class Trainer:
             with cm:
                 self.reset_metrics()
                 self.n_batches = len(dataset)
-                for self.ibatch, batch in enumerate(dataset):
+                for self.ibatch, (batch, ref_batch) in enumerate(zip(dataset, ref_dataset)):
                     self.batch_step(
                         data=batch,
+                        ref_data=ref_batch,
                         validation=(category == VALIDATION),
                     )
                     self.end_of_batch_log(batch_type=category)
@@ -1147,7 +1162,9 @@ class Trainer:
     def set_dataset(
         self,
         dataset: ConcatDataset,
+        ref_dataset: ReferenceConcatDataset,
         validation_dataset: Optional[ConcatDataset] = None,
+        ref_validation_dataset: Optional[ReferenceConcatDataset] = None,
     ) -> None:
         """Set the dataset(s) used by this trainer.
 
@@ -1164,7 +1181,6 @@ class Trainer:
 
         if self.train_idcs is None or self.val_idcs is None:
             self.train_idcs, self.val_idcs = [], []
-            # Sample both from `dataset`:
             if validation_dataset is not None:
                 for _validation_dataset, n_val in zip(validation_dataset.datasets, self.n_val):
                     total_n = len(_validation_dataset)
@@ -1208,17 +1224,20 @@ class Trainer:
                     self.val_idcs.append(idcs[n_train : n_train + n_val])
             if validation_dataset is None:
                 validation_dataset = dataset
+                ref_validation_dataset = ref_dataset
 
         # torch_geometric datasets inherantly support subsets using `index_select`
         indexed_datasets_train = []
         for _dataset, train_idcs in zip(dataset.datasets, self.train_idcs):
             indexed_datasets_train.append(_dataset.index_select(train_idcs))
         self.dataset_train = ConcatDataset(indexed_datasets_train)
+        self.ref_dataset_train = ref_dataset
         
         indexed_datasets_val = []
         for _dataset, val_idcs in zip(validation_dataset.datasets, self.val_idcs):
             indexed_datasets_val.append(_dataset.index_select(val_idcs))
         self.dataset_val = ConcatDataset(indexed_datasets_val)
+        self.ref_dataset_val = ref_validation_dataset
 
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
@@ -1249,3 +1268,15 @@ class Trainer:
             batch_size=self.validation_batch_size,
             **dl_kwargs,
         )
+
+        # reference dataloaders don't shuffle and pick always a batch of
+        # n_datasets samples, one for each dataset
+        dl_ref_kwargs = dict(
+            batch_size=self.ref_dataset_train.n_datasets,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=(self.torch_device != torch.device("cpu")),
+        )
+        self.dl_ref_train = DataLoader(dataset=self.ref_dataset_train, **dl_ref_kwargs)
+        dl_ref_kwargs['batch_size'] = self.ref_dataset_val.n_datasets
+        self.dl_ref_val = DataLoader(dataset=self.ref_dataset_val, **dl_ref_kwargs)

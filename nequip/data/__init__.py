@@ -7,7 +7,7 @@ from .AtomicData import (
     _EDGE_FIELDS,
     _GRAPH_FIELDS,
 )
-from .dataset import AtomicDataset, AtomicInMemoryDataset, NpzDataset, ASEDataset
+from .dataset import ReferenceConcatDataset, AtomicDataset, AtomicInMemoryDataset, NpzDataset, ASEDataset
 from .dataloader import DataLoader, Collater
 from ._build import dataset_from_config
 from ._test_data import EMTTestDataset
@@ -17,6 +17,7 @@ __all__ = [
     PBC,
     register_fields,
     deregister_fields,
+    ReferenceConcatDataset,
     AtomicDataset,
     AtomicInMemoryDataset,
     NpzDataset,

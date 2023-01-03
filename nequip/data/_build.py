@@ -91,4 +91,7 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         )
 
         instances.append(instance)
-    return ConcatDataset(instances)
+    
+    if config.get("train_on_delta", False):
+        return ConcatDataset(instances), data.dataset.ReferenceConcatDataset(instances)
+    return ConcatDataset(instances), None

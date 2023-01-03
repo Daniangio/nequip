@@ -38,13 +38,28 @@ def add_avg_num_neighbors(
             raise ValueError(
                 "When avg_num_neighbors = auto, the dataset is required to build+initialize a model"
             )
-        ann, var_nn = dataset.datasets[0].statistics(
-            fields=[_add_avg_num_neighbors_helper],
-            modes=["mean_std"],
-            stride=config.get("dataset_statistics_stride", 1),
-        )[0]
-        ann = ann.item()
-        var_nn = var_nn.item()
+        cnns, anns, var_nns = [], [], []
+        for ds in dataset.datasets:
+            cnn, ann, var_nn = ds.statistics(
+                fields=[_add_avg_num_neighbors_helper],
+                modes=["count_mean_std"],
+                stride=config.get("dataset_statistics_stride", 1),
+            )[0]
+            cnns.append(cnn.sum().item())
+            anns.append(ann.item())
+            var_nns.append(var_nn.item())
+        ann = 0.
+        for c, a in zip(cnns, anns):
+            ann += c * a
+        ann /= sum(cnns)
+        c1 = cnns[0]
+        a1 = anns[0]
+        var_nn = var_nns[0]
+        for c2, a2, var2 in zip(cnns[1:], anns[1:], var_nns[1:]):
+            var_nn = (c1 * var_nn + c2 * var2) / (c1 + c2) + (c1 * c2 * (a1 - a2)**2) / (c1 + c2)**2
+            c1 = c2
+            a1 = a2
+
 
     # make sure its valid
     if ann is not None:

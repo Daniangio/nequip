@@ -6,14 +6,16 @@ import functools
 import itertools
 import yaml
 import hashlib
+import random
 from os.path import dirname, basename, abspath
-from typing import Tuple, Dict, Any, List, Callable, Union, Optional, Sequence
+from typing import Iterable, Tuple, Dict, Any, List, Callable, Union, Optional, Sequence
 
 import ase
 import ase.io
 
 import torch
 import torch.multiprocessing as mp
+from torch.utils.data import ConcatDataset
 
 from torch_runstats.scatter import scatter_std, scatter_mean
 
@@ -34,6 +36,23 @@ from nequip.utils.savenload import atomic_write
 from nequip.utils.multiprocessing import num_tasks
 from .transforms import TypeMapper
 from .AtomicData import _process_dict
+
+
+class ReferenceConcatDataset(ConcatDataset):
+    n_datasets: int
+
+    def __init__(self, datasets: Iterable[Dataset]) -> None:
+        super().__init__(datasets)
+        self.n_datasets = len(self.datasets)
+    
+    def __getitem__(self, idx):
+        if idx < 0:
+            if -idx > len(self):
+                raise ValueError("absolute value of index should not exceed dataset length")
+            idx = len(self) + idx
+        dataset_idx = idx % self.n_datasets
+        sample_idx = random.randint(0, len(self.datasets[dataset_idx]) - 1)
+        return self.datasets[dataset_idx][sample_idx]
 
 
 class AtomicDataset(Dataset):
@@ -498,6 +517,15 @@ class AtomicInMemoryDataset(AtomicDataset):
                 mean = torch.mean(arr, dim=0)
                 std = torch.std(arr, dim=0, unbiased=unbiased)
                 out.append((mean, std))
+            
+            elif ana_mode == "count_mean_std":
+                _, counts = torch.unique(
+                    torch.flatten(arr), return_counts=True, sorted=True
+                )
+                # mean and std
+                mean = torch.mean(arr, dim=0)
+                std = torch.std(arr, dim=0, unbiased=unbiased)
+                out.append((counts, mean, std))
 
             elif ana_mode.startswith("per_species_"):
                 # per-species

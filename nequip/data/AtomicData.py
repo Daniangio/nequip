@@ -456,6 +456,7 @@ class AtomicData(Data):
         self,
         type_mapper=None,
         extra_fields: List[str] = [],
+        filter_idcs: Optional[torch.Tensor] = None,
     ) -> Union[List[ase.Atoms], ase.Atoms]:
         """Build a (list of) ``ase.Atoms`` object(s) from an ``AtomicData`` object.
 
@@ -492,11 +493,24 @@ class AtomicData(Data):
             )
             atomic_nums = self[AtomicDataDict.ATOM_TYPE_KEY]
         pbc = getattr(self, AtomicDataDict.PBC_KEY, None)
+        if pbc is not None:
+            pbc = pbc[filter_idcs]
         cell = getattr(self, AtomicDataDict.CELL_KEY, None)
+        if cell is not None:
+            cell = cell[filter_idcs]
         batch = getattr(self, AtomicDataDict.BATCH_KEY, None)
+        assert batch is not None
+        batch = batch[torch.isin(batch, torch.nonzero(filter_idcs).reshape(-1))]
         energy = getattr(self, AtomicDataDict.TOTAL_ENERGY_KEY, None)
+        if energy is not None:
+            energy = energy[filter_idcs]
         energies = getattr(self, AtomicDataDict.PER_ATOM_ENERGY_KEY, None)
+        if energies is not None:
+            energies = energies[torch.isin(batch, torch.nonzero(filter_idcs).reshape(-1))]
         force = getattr(self, AtomicDataDict.FORCE_KEY, None)
+        if force is not None:
+            force = force[torch.isin(batch, torch.nonzero(filter_idcs).reshape(-1))]
+        positions = positions[torch.isin(batch, torch.nonzero(filter_idcs).reshape(-1))]
         do_calc = any(
             k in self
             for k in [

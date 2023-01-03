@@ -35,6 +35,7 @@ default_config = dict(
     ],
     dataset_statistics_stride=1,
     default_dtype="float32",
+    train_on_delta=False,
     allow_tf32=False,  # TODO: until we understand equivar issues
     verbose="INFO",
     model_debug_mode=False,
@@ -111,6 +112,13 @@ def parse_command_line(args=None):
     config = Config.from_file(args.config, defaults=default_config)
     for flag in ("model_debug_mode", "equivariance_test", "grad_anomaly_mode"):
         config[flag] = getattr(args, flag) or config[flag]
+    
+    loss_coeffs = config.get("loss_coeffs", None)
+    if isinstance(loss_coeffs, dict):
+        for value in loss_coeffs.values():
+            if isinstance(value, (list, tuple)) and len(value) > 2 and value[2].get("TrainOnDelta", False):
+                config["train_on_delta"] = True
+                break
 
     return config
 
@@ -123,14 +131,21 @@ def fresh_start(config):
     # = Make the trainer =
     if config.wandb:
         import wandb  # noqa: F401
-        from nequip.train.trainer_wandb import TrainerWandB
-
         # download parameters from wandb in case of sweeping
         from nequip.utils.wandb import init_n_update
-
         config = init_n_update(config)
 
-        trainer = TrainerWandB(model=None, **dict(config))
+        if config.train_on_delta:
+            from nequip.train.trainer_delta_wandb import TrainerDeltaWandB
+            trainer = TrainerDeltaWandB(model=None, **dict(config))
+        else:
+            from nequip.train.trainer_wandb import TrainerWandB
+            trainer = TrainerWandB(model=None, **dict(config))
+
+    elif config.train_on_delta:
+        from nequip.train.trainer_delta import TrainerDelta
+
+        trainer = TrainerDelta(model=None, **dict(config))
     else:
         from nequip.train.trainer import Trainer
 
@@ -141,19 +156,23 @@ def fresh_start(config):
     config.update(trainer.params)
 
     # = Load the dataset =
-    dataset = dataset_from_config(config, prefix="dataset")
+    dataset, ref_dataset = dataset_from_config(config, prefix="dataset")
     logging.info(f"Successfully loaded the data set of type {dataset}...")
     try:
-        validation_dataset = dataset_from_config(config, prefix="validation_dataset")
+        validation_dataset, validation_ref_dataset = dataset_from_config(config, prefix="validation_dataset")
         logging.info(
             f"Successfully loaded the validation data set of type {validation_dataset}..."
         )
     except KeyError:
         # It couldn't be found
         validation_dataset = None
+        validation_ref_dataset = None
 
-    # = Train/test split =
-    trainer.set_dataset(dataset, validation_dataset)
+    # = Train/validation split =
+    if config.train_on_delta:
+        trainer.set_dataset(dataset, ref_dataset, validation_dataset, validation_ref_dataset)
+    else:
+        trainer.set_dataset(dataset, validation_dataset)
 
     # = Build model =
     final_model = model_from_config(

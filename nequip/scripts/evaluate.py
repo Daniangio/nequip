@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 import sys
 import argparse
@@ -22,6 +23,24 @@ from nequip.utils import load_file, instantiate, Config
 
 ORIGINAL_DATASET_INDEX_KEY: str = "original_dataset_index"
 register_fields(graph_fields=[ORIGINAL_DATASET_INDEX_KEY])
+
+def register_field(field_name: str):
+    split = field_name.split(":")
+    if len(split) == 1:
+        return split
+    assert len(split) == 2
+    name, field = split
+    if field == "node":
+        register_fields(node_fields=[name])
+    elif field == "edge":
+        register_fields(edge_fields=[name])
+    elif field == "graph":
+        register_fields(graph_fields=[name])
+    elif field == "long":
+        register_fields(long_fields=[name])
+    else:
+        raise ValueError(f"{name} is not a valid field type. Permissible field types are [node, edge, graph, long]")
+    return name
 
 
 def main(args=None, running_as_script: bool = True):
@@ -108,7 +127,9 @@ def main(args=None, running_as_script: bool = True):
     )
     parser.add_argument(
         "--output-fields",
-        help="Extra fields (names comma separated with no spaces) to write to the `--output`.",
+        help="Extra fields (names[:field] comma separated with no spaces) to write to the `--output`.\n"
+             "Field options are: [node, edge, graph, long].\n"
+             "If [:field] is omitted, the field with that name is assumed to be already registered by default.",
         type=str,
         default="",
     )
@@ -174,7 +195,7 @@ def main(args=None, running_as_script: bool = True):
     if args.output is not None:
         if args.output.suffix != ".xyz":
             raise ValueError("Only .xyz format for `--output` is supported.")
-        args.output_fields = [e for e in args.output_fields.split(",") if e != ""] + [
+        args.output_fields = [register_field(e) for e in args.output_fields.split(",") if e != ""] + [
             ORIGINAL_DATASET_INDEX_KEY
         ]
         output_type = "xyz"
@@ -239,6 +260,7 @@ def main(args=None, running_as_script: bool = True):
         )
         model = model.to(device)
         logger.info("loaded model from training session")
+        model_root = model_config["root"]
         model_r_max = model_config["r_max"]
     model.eval()
 
@@ -247,26 +269,35 @@ def main(args=None, running_as_script: bool = True):
         f"Loading {'original ' if dataset_is_from_training else ''}dataset...",
     )
     dataset_config = Config.from_file(
-        str(args.dataset_config), defaults={"r_max": model_r_max}
+        str(args.dataset_config), defaults={"root": model_root, "r_max": model_r_max}
     )
     if dataset_config["r_max"] != model_r_max:
         raise RuntimeError(
             f"Dataset config has r_max={dataset_config['r_max']}, but model has r_max={model_r_max}!"
         )
 
+    dataset_is_test: bool = False
     dataset_is_validation: bool = False
     try:
-        # Try to get validation dataset
-        dataset = dataset_from_config(dataset_config, prefix="validation_dataset")
-        dataset_is_validation = True
+        # Try to get test dataset
+        dataset, _ = dataset_from_config(dataset_config, prefix="test_dataset")
+        dataset_is_test = True
     except KeyError:
         pass
-    if not dataset_is_validation:
+    if not dataset_is_test:
+        try:
+            # Try to get validation dataset
+            dataset, _ = dataset_from_config(dataset_config, prefix="validation_dataset")
+            dataset_is_validation = True
+        except KeyError:
+            pass
+    
+    if not (dataset_is_test or dataset_is_validation):
         # Get shared train + validation dataset
         # prefix `dataset`
-        dataset = dataset_from_config(dataset_config)
+        dataset, _ = dataset_from_config(dataset_config)
     logger.info(
-        f"Loaded {'validation_' if dataset_is_validation else ''}dataset specified in {args.dataset_config.name}.",
+        f"Loaded {'test_' if dataset_is_test else 'validation_' if dataset_is_validation else ''}dataset specified in {args.dataset_config.name}.",
     )
 
     c = Collater.for_dataset(dataset, exclude_keys=[])
@@ -278,29 +309,35 @@ def main(args=None, running_as_script: bool = True):
         and dataset_is_from_training
         and train_idcs is not None
     ):
-        # we know the train and val, get the rest
-        all_idcs = set(range(len(dataset)))
-        # set operations
-        if dataset_is_validation:
-            test_idcs = list(all_idcs - val_idcs)
+        if dataset_is_test:
+            test_idcs = torch.arange(dataset.len())
             logger.info(
-                f"Using origial validation dataset ({len(dataset)} frames) minus validation set frames ({len(val_idcs)} frames), yielding a test set size of {len(test_idcs)} frames.",
+                f"Using all frames from original test dataset, yielding a test set size of {len(test_idcs)} frames.",
             )
         else:
-            test_idcs = list(all_idcs - train_idcs - val_idcs)
-            assert set(test_idcs).isdisjoint(train_idcs)
-            logger.info(
-                f"Using origial training dataset ({len(dataset)} frames) minus training ({len(train_idcs)} frames) and validation frames ({len(val_idcs)} frames), yielding a test set size of {len(test_idcs)} frames.",
-            )
-        # No matter what it should be disjoint from validation:
-        assert set(test_idcs).isdisjoint(val_idcs)
-        if not do_metrics:
-            logger.info(
-                "WARNING: using the automatic test set ^^^ but not computing metrics, is this really what you wanted to do?",
-            )
+            # we know the train and val, get the rest
+            all_idcs = set(range(len(dataset)))
+            # set operations
+            if dataset_is_validation:
+                test_idcs = list(all_idcs - val_idcs)
+                logger.info(
+                    f"Using origial validation dataset ({len(dataset)} frames) minus validation set frames ({len(val_idcs)} frames), yielding a test set size of {len(test_idcs)} frames.",
+                )
+            else:
+                test_idcs = list(all_idcs - train_idcs - val_idcs)
+                assert set(test_idcs).isdisjoint(train_idcs)
+                logger.info(
+                    f"Using origial training dataset ({len(dataset)} frames) minus training ({len(train_idcs)} frames) and validation frames ({len(val_idcs)} frames), yielding a test set size of {len(test_idcs)} frames.",
+                )
+            # No matter what it should be disjoint from validation:
+            assert set(test_idcs).isdisjoint(val_idcs)
+            if not do_metrics:
+                logger.info(
+                    "WARNING: using the automatic test set ^^^ but not computing metrics, is this really what you wanted to do?",
+                )
     elif args.test_indexes is None:
         # Default to all frames
-        test_idcs = torch.arange(dataset.len())
+        test_idcs = torch.arange(len(dataset))
         logger.info(
             f"Using all frames from the specified test dataset, yielding a test set size of {len(test_idcs)} frames.",
         )
@@ -366,9 +403,19 @@ def main(args=None, running_as_script: bool = True):
             )
 
         if output_type is not None:
-            output = context_stack.enter_context(open(args.output, "w"))
+            output = []
+            output_target = []
+            for dataset_idx, ds in enumerate(dataset.datasets):
+                ds_filename = ".".join(os.path.split(ds.file_name)[-1].split(".")[:-1])
+                path, out_filename = os.path.split(args.output)
+                out_filename_split = out_filename.split(".")
+                output_filename = ".".join([f"ds_{dataset_idx}__{ds_filename}__" + ".".join(out_filename_split[:-1])] + out_filename_split[-1:])
+                output.append(context_stack.enter_context(open(os.path.join(path, output_filename), "w")))
+                output_target_filename = ".".join([f"ds_{dataset_idx}__{ds_filename}__" + ".".join(out_filename_split[:-1]) + "_target"] + out_filename_split[-1:])
+                output_target.append(context_stack.enter_context(open(os.path.join(path, output_target_filename), "w")))
         else:
             output = None
+            output_target = None
 
         while True:
             this_batch_test_indexes = test_idcs[
@@ -379,7 +426,8 @@ def main(args=None, running_as_script: bool = True):
                 break
             batch = c.collate(datas)
             batch = batch.to(device)
-            out = model(AtomicData.to_AtomicDataDict(batch))
+            batch_ = AtomicData.to_AtomicDataDict(batch)
+            out = model(batch_)
 
             with torch.no_grad():
                 # Write output
@@ -388,18 +436,35 @@ def main(args=None, running_as_script: bool = True):
                     out[ORIGINAL_DATASET_INDEX_KEY] = torch.LongTensor(
                         this_batch_test_indexes
                     )
-                    # append to the file
-                    ase.io.write(
-                        output,
-                        AtomicData.from_AtomicDataDict(out)
-                        .to(device="cpu")
-                        .to_ase(
-                            type_mapper=dataset.type_mapper,
-                            extra_fields=args.output_fields,
-                        ),
-                        format="extxyz",
-                        append=True,
+                    batch_[ORIGINAL_DATASET_INDEX_KEY] = torch.LongTensor(
+                        this_batch_test_indexes
                     )
+                    # append to the file
+                    for dataset_idx in torch.unique(out['dataset_idx']).to('cpu').tolist():
+                        ase.io.write(
+                            output[dataset_idx],
+                            AtomicData.from_AtomicDataDict(out)
+                            .to(device="cpu")
+                            .to_ase(
+                                type_mapper=dataset.datasets[dataset_idx].type_mapper,
+                                extra_fields=args.output_fields,
+                                filter_idcs=(out['dataset_idx'] == dataset_idx).to('cpu'),
+                            ),
+                            format="extxyz",
+                            append=True,
+                        )
+                        ase.io.write(
+                            output_target[dataset_idx],
+                            AtomicData.from_AtomicDataDict(batch_)
+                            .to(device="cpu")
+                            .to_ase(
+                                type_mapper=dataset.datasets[dataset_idx].type_mapper,
+                                extra_fields=args.output_fields,
+                                filter_idcs=(out['dataset_idx'] == dataset_idx).to('cpu'),
+                            ),
+                            format="extxyz",
+                            append=True,
+                        )
 
                 # Accumulate metrics
                 if do_metrics:

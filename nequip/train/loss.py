@@ -46,6 +46,7 @@ class Loss:
         self.coeffs = {}
         self.funcs = {}
         self.keys = []
+        self.delta_keys = []
 
         mseloss = find_loss_function("MSELoss", {})
         if isinstance(coeffs, str):
@@ -72,6 +73,10 @@ class Loss:
                         if len(value) > 1:
                             func = value[1]
                         if len(value) > 2:
+                            assert isinstance(value[2], dict)
+                            train_on_delta = value[2].pop("TrainOnDelta", False)
+                            if train_on_delta:
+                                self.delta_keys += [key]
                             func_params = value[2]
                     else:
                         func = value[0]
