@@ -154,6 +154,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         include_frames: Optional[List[int]] = None,
         type_mapper: Optional[TypeMapper] = None,
     ):
+        self.dataset_idx = dataset_idx
         # TO DO, this may be simplified
         # See if a subclass defines some inputs
         self.file_name = (
@@ -195,8 +196,6 @@ class AtomicInMemoryDataset(AtomicDataset):
                     f"please delete the processed folder and rerun {self.processed_paths[0]}"
                 )
             self.dataset_idx = self.fixed_fields['dataset_idx'].item()
-        else:
-            self.dataset_idx = dataset_idx
 
     def len(self):
         if self.data is None:
