@@ -91,7 +91,8 @@ class AtomicDataset(Dataset):
         pnames = list(inspect.signature(self.__init__).parameters)
         IGNORE_KEYS = {
             # the type mapper is applied after saving, not before, so doesn't matter to cache validity
-            "type_mapper"
+            "type_mapper",
+            "dataset_idx"
         }
         params = {
             k: getattr(self, k)
@@ -155,7 +156,6 @@ class AtomicInMemoryDataset(AtomicDataset):
     ):
         # TO DO, this may be simplified
         # See if a subclass defines some inputs
-        self.dataset_idx = dataset_idx
         self.file_name = (
             getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
         )
@@ -194,6 +194,9 @@ class AtomicInMemoryDataset(AtomicDataset):
                     f"the include_frames is changed. "
                     f"please delete the processed folder and rerun {self.processed_paths[0]}"
                 )
+            self.dataset_idx = self.fixed_fields['dataset_idx'].item()
+        else:
+            self.dataset_idx = dataset_idx
 
     def len(self):
         if self.data is None:
