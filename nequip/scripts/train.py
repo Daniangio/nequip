@@ -251,11 +251,19 @@ def restart(config):
     # note, the from_dict method will check whether the code version
     # in trainer.pth is consistent and issue warnings
     if config.wandb:
-        from nequip.train.trainer_wandb import TrainerWandB
         from nequip.utils.wandb import resume
 
         resume(config)
-        trainer = TrainerWandB.from_dict(dictionary)
+        if config.train_on_delta:
+            from nequip.train.trainer_delta_wandb import TrainerDeltaWandB
+            trainer = TrainerDeltaWandB.from_dict(dictionary)
+        else:
+            from nequip.train.trainer_wandb import TrainerWandB
+            trainer = TrainerWandB.from_dict(dictionary)
+    elif config.train_on_delta:
+        from nequip.train.trainer_delta import TrainerDelta
+
+        trainer = TrainerDelta.from_dict(dictionary)
     else:
         from nequip.train.trainer import Trainer
 

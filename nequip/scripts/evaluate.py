@@ -92,6 +92,12 @@ def main(args=None, running_as_script: bool = True):
         default=None,
     )
     parser.add_argument(
+        "--stride",
+        help="If dataset config is provided and test indexes are not provided, take all dataset idcs with this stride",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
         "--batch-size",
         help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this.",
         type=int,
@@ -337,9 +343,9 @@ def main(args=None, running_as_script: bool = True):
                 )
     elif args.test_indexes is None:
         # Default to all frames
-        test_idcs = torch.arange(len(dataset))
+        test_idcs = torch.arange(len(dataset))[::args.stride]
         logger.info(
-            f"Using all frames from the specified test dataset, yielding a test set size of {len(test_idcs)} frames.",
+            f"Using all frames from the specified test dataset with stride {args.stride}, yielding a test set size of {len(test_idcs)} frames.",
         )
     else:
         # load from file
@@ -405,13 +411,15 @@ def main(args=None, running_as_script: bool = True):
         if output_type is not None:
             output = []
             output_target = []
-            for dataset_idx, ds in enumerate(dataset.datasets):
+            dataset_idx_to_idx = dict()
+            for idx, ds in enumerate(dataset.datasets):
                 ds_filename = ".".join(os.path.split(ds.file_name)[-1].split(".")[:-1])
                 path, out_filename = os.path.split(args.output)
                 out_filename_split = out_filename.split(".")
-                output_filename = ".".join([f"ds_{dataset_idx}__{ds_filename}__" + ".".join(out_filename_split[:-1])] + out_filename_split[-1:])
+                dataset_idx_to_idx[ds.dataset_idx] = idx
+                output_filename = ".".join([f"ds_{ds.dataset_idx}__{ds_filename}__" + ".".join(out_filename_split[:-1])] + out_filename_split[-1:])
                 output.append(context_stack.enter_context(open(os.path.join(path, output_filename), "w")))
-                output_target_filename = ".".join([f"ds_{dataset_idx}__{ds_filename}__" + ".".join(out_filename_split[:-1]) + "_target"] + out_filename_split[-1:])
+                output_target_filename = ".".join([f"ds_{ds.dataset_idx}__{ds_filename}__" + ".".join(out_filename_split[:-1]) + "_target"] + out_filename_split[-1:])
                 output_target.append(context_stack.enter_context(open(os.path.join(path, output_target_filename), "w")))
         else:
             output = None
@@ -441,12 +449,13 @@ def main(args=None, running_as_script: bool = True):
                     )
                     # append to the file
                     for dataset_idx in torch.unique(out['dataset_idx']).to('cpu').tolist():
+                        idx = dataset_idx_to_idx[dataset_idx]
                         ase.io.write(
-                            output[dataset_idx],
+                            output[idx],
                             AtomicData.from_AtomicDataDict(out)
                             .to(device="cpu")
                             .to_ase(
-                                type_mapper=dataset.datasets[dataset_idx].type_mapper,
+                                type_mapper=dataset.datasets[idx].type_mapper,
                                 extra_fields=args.output_fields,
                                 filter_idcs=(out['dataset_idx'] == dataset_idx).to('cpu'),
                             ),
@@ -454,11 +463,11 @@ def main(args=None, running_as_script: bool = True):
                             append=True,
                         )
                         ase.io.write(
-                            output_target[dataset_idx],
+                            output_target[idx],
                             AtomicData.from_AtomicDataDict(batch_)
                             .to(device="cpu")
                             .to_ase(
-                                type_mapper=dataset.datasets[dataset_idx].type_mapper,
+                                type_mapper=dataset.datasets[idx].type_mapper,
                                 extra_fields=args.output_fields,
                                 filter_idcs=(out['dataset_idx'] == dataset_idx).to('cpu'),
                             ),

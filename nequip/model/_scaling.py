@@ -236,8 +236,8 @@ def PerSpeciesRescale(
         # the real ones will be loaded from the state dict later
         # note that the state dict includes buffers,
         # so this is fine regardless of whether its trainable.
-        scales = [torch.tensor(1.0), torch.tensor(1.0)] if scales is not None else None
-        shifts = [torch.tensor(0.0), torch.tensor(0.0)] if shifts is not None else None
+        scales = [torch.tensor(1.0)] if scales is not None else None
+        shifts = [torch.tensor(0.0)] if shifts is not None else None
         # values correctly scaled according to where the come from
         # will be brought from the state dict later,
         # so what you set this to doesnt matter:

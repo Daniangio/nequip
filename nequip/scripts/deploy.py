@@ -179,7 +179,7 @@ def main(args=None):
         model, metadata = load_deployed_model(args.model_path, device=config['device'], set_global_options=False)
         
         from nequip.data import dataset_from_config
-        dataset = dataset_from_config(config, prefix="dataset")
+        dataset, _ = dataset_from_config(config, prefix="dataset")
         dl_kwargs = dict(
             exclude_keys=[],
             num_workers=0,
