@@ -493,24 +493,12 @@ class AtomicData(Data):
             )
             atomic_nums = self[AtomicDataDict.ATOM_TYPE_KEY]
         pbc = getattr(self, AtomicDataDict.PBC_KEY, None)
-        if pbc is not None:
-            pbc = pbc[filter_idcs]
         cell = getattr(self, AtomicDataDict.CELL_KEY, None)
-        if cell is not None:
-            cell = cell[filter_idcs]
         batch = getattr(self, AtomicDataDict.BATCH_KEY, None)
-        assert batch is not None
-        batch = batch[torch.isin(batch, torch.nonzero(filter_idcs).reshape(-1))]
+        batch_filtered = batch[torch.isin(batch, torch.nonzero(filter_idcs).reshape(-1))] if batch is not None else None
         energy = getattr(self, AtomicDataDict.TOTAL_ENERGY_KEY, None)
-        if energy is not None:
-            energy = energy[filter_idcs]
         energies = getattr(self, AtomicDataDict.PER_ATOM_ENERGY_KEY, None)
-        if energies is not None:
-            energies = energies[torch.isin(batch, torch.nonzero(filter_idcs).reshape(-1))]
         force = getattr(self, AtomicDataDict.FORCE_KEY, None)
-        if force is not None:
-            force = force[torch.isin(batch, torch.nonzero(filter_idcs).reshape(-1))]
-        positions = positions[torch.isin(batch, torch.nonzero(filter_idcs).reshape(-1))]
         do_calc = any(
             k in self
             for k in [
@@ -541,15 +529,8 @@ class AtomicData(Data):
         if pbc is not None:
             pbc = pbc.view(-1, 3)
 
-        if batch is not None:
-            n_batches = batch.max() + 1
-            cell = cell.expand(n_batches, 3, 3) if cell is not None else None
-            pbc = pbc.expand(n_batches, 3) if pbc is not None else None
-        else:
-            n_batches = 1
-
         batch_atoms = []
-        for batch_idx in range(n_batches):
+        for batch_idx in batch_filtered.unique():
             if batch is not None:
                 mask = batch == batch_idx
                 mask = mask.view(-1)
