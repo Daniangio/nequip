@@ -2,6 +2,7 @@
 from typing import Optional, Dict, Callable
 
 import torch
+import math
 
 from torch_runstats.scatter import scatter
 
@@ -20,6 +21,7 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
 
     def __init__(
         self,
+        layer: int,
         irreps_in,
         irreps_out,
         invariant_layers=1,
@@ -41,6 +43,7 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
         :param irreps_in: Input Features, default = None
         :param use_sc: bool, use self-connection or not
         """
+        self.layer = layer
         super().__init__()
 
         self._init_irreps(
@@ -173,7 +176,7 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
         # Necessary to get TorchScript to be able to type infer when its not None
         avg_num_neigh: Optional[float] = self.avg_num_neighbors
         if avg_num_neigh is not None:
-            x = x.div(avg_num_neigh**0.5)
+            x = x.div(avg_num_neigh**(0.5 * math.sqrt(self.layer)))
 
         x = self.linear_2(x)
 
