@@ -477,16 +477,21 @@ def main(args=None, running_as_script: bool = True):
 
                 # Accumulate metrics
                 if do_metrics:
-                    metrics(out, batch)
-                    display_bar.set_description_str(
-                        " | ".join(
-                            f"{k} = {v:4.4f}"
-                            for k, v in metrics.flatten_metrics(
-                                metrics.current_result(),
-                                type_names=dataset.datasets[0].type_mapper.type_names,
-                            )[0].items()
+                    try:
+                        metrics(out, batch)
+                        display_bar.set_description_str(
+                            " | ".join(
+                                f"{k} = {v:4.4f}"
+                                for k, v in metrics.flatten_metrics(
+                                    metrics.current_result(),
+                                    type_names=dataset.datasets[0].type_mapper.type_names,
+                                )[0].items()
+                            )
                         )
-                    )
+                    except:
+                        display_bar.set_description_str(
+                            "No metrics available for this dataset. Ground truth may be missing."
+                        )
 
             batch_i += 1
             prog.update(batch.num_graphs)
