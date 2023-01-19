@@ -75,6 +75,7 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
             prefix=prefix,
             arg_dicts=[_config[prefixed_eff_key], _config],
         )
+        _config["using_bead_numbers"] = "bead_numbers" in _config_dataset.get("npz_fixed_field_keys", {})
 
         # Build a TypeMapper from the config
         type_mapper, _ = instantiate(TypeMapper, prefix=prefix, optional_args=_config)

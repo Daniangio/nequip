@@ -24,6 +24,8 @@ PBC_KEY: Final[str] = "pbc"
 # [n_atom, 1] long tensor
 ATOMIC_NUMBERS_KEY: Final[str] = "atomic_numbers"
 # [n_atom, 1] long tensor
+BEAD_NUMBERS_KEY: Final[str] = "bead_numbers"
+# [n_atom, 1] long tensor
 ATOM_TYPE_KEY: Final[str] = "atom_types"
 
 BASIC_STRUCTURE_KEYS: Final[List[str]] = [

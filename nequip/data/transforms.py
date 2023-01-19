@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, Optional, Union, List
 import warnings
 
@@ -21,7 +22,12 @@ class TypeMapper:
         type_names: Optional[List[str]] = None,
         chemical_symbol_to_type: Optional[Dict[str, int]] = None,
         chemical_symbols: Optional[List[str]] = None,
+        using_bead_numbers: bool = False,
     ):
+        if using_bead_numbers:
+            # check consistency
+            assert type_names is not None, \
+            "When training on at least one dataset that uses bead_numbers as atom types, you have to provide type_names."
         if chemical_symbols is not None:
             if chemical_symbol_to_type is not None:
                 raise ValueError(
@@ -56,7 +62,10 @@ class TypeMapper:
                 # Make sure they agree on types
                 # We already checked that chem->type is contiguous,
                 # so enough to check length since type_names is a list
-                assert len(type_names) == len(self.chemical_symbol_to_type)
+                if using_bead_numbers:
+                    assert len(type_names) >= len(self.chemical_symbol_to_type)
+                else:
+                    assert len(type_names) == len(self.chemical_symbol_to_type)
             # Make mapper array
             valid_atomic_numbers = [
                 ase.data.atomic_numbers[sym] for sym in self.chemical_symbol_to_type
@@ -78,12 +87,14 @@ class TypeMapper:
         # check
         if type_names is None:
             raise ValueError(
-                "None of chemical_symbols, chemical_symbol_to_type, nor type_names was provided; exactly one is required"
+                "None of chemical_symbols, chemical_symbol_to_type, nor type_names was provided; exactly one is required. " +
+                "If you are using beads of unspecified/mixed chemical species, specify the following in the configuration file:\n" +
+                "chemical_symbols:\n  - X"
             )
         # validate type names
-        assert all(
-            n.isalnum() for n in type_names
-        ), "Type names must contain only alphanumeric characters"
+        # assert all(
+        #     n.isalnum() for n in type_names
+        # ), "Type names must contain only alphanumeric characters"
         # Set to however many maps specified -- we already checked contiguous
         self.num_types = len(type_names)
         # Check type_names
@@ -92,8 +103,24 @@ class TypeMapper:
     def __call__(
         self, data: Union[AtomicDataDict.Type, AtomicData], types_required: bool = True
     ) -> Union[AtomicDataDict.Type, AtomicData]:
+        if AtomicDataDict.BEAD_NUMBERS_KEY in data:
+            data[AtomicDataDict.ATOM_TYPE_KEY] = data[AtomicDataDict.BEAD_NUMBERS_KEY]
+            if AtomicDataDict.ATOMIC_NUMBERS_KEY not in data:
+                data[AtomicDataDict.ATOMIC_NUMBERS_KEY] = torch.zeros_like(
+                    data[AtomicDataDict.ATOM_TYPE_KEY],
+                    device=data[AtomicDataDict.ATOM_TYPE_KEY].device
+                )
+                logging.info(
+                    "Data contained BEAD_NUMBERS_KEY but did not contain ATOMIC_NUMBERS_KEY; " +
+                    "Defaulting to beads of unspecified/mixed chemical species with atomic number 0."
+                )
         if AtomicDataDict.ATOM_TYPE_KEY in data:
-            if AtomicDataDict.ATOMIC_NUMBERS_KEY in data:
+            if AtomicDataDict.BEAD_NUMBERS_KEY in data:
+                del data[AtomicDataDict.BEAD_NUMBERS_KEY]
+                # logging.info(
+                #     "Data contained BEAD_NUMBERS_KEY; using bead numbers as atom types."
+                # )
+            elif AtomicDataDict.ATOMIC_NUMBERS_KEY in data:
                 warnings.warn(
                     "Data contained both ATOM_TYPE_KEY and ATOMIC_NUMBERS_KEY; ignoring ATOMIC_NUMBERS_KEY"
                 )

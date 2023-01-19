@@ -29,6 +29,7 @@ PBC = Union[bool, Tuple[bool, bool, bool]]
 _DEFAULT_LONG_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_INDEX_KEY,
     AtomicDataDict.ATOMIC_NUMBERS_KEY,
+    AtomicDataDict.BEAD_NUMBERS_KEY,
     AtomicDataDict.ATOM_TYPE_KEY,
     AtomicDataDict.BATCH_KEY,
 }
@@ -37,6 +38,7 @@ _DEFAULT_NODE_FIELDS: Set[str] = {
     AtomicDataDict.NODE_FEATURES_KEY,
     AtomicDataDict.NODE_ATTRS_KEY,
     AtomicDataDict.ATOMIC_NUMBERS_KEY,
+    AtomicDataDict.BEAD_NUMBERS_KEY,
     AtomicDataDict.ATOM_TYPE_KEY,
     AtomicDataDict.FORCE_KEY,
     AtomicDataDict.PER_ATOM_ENERGY_KEY,
@@ -253,6 +255,11 @@ class AtomicData(Data):
                 and self.atomic_numbers is not None
             ):
                 assert self.atomic_numbers.dtype in _TORCH_INTEGER_DTYPES
+            if (
+                AtomicDataDict.BEAD_NUMBERS_KEY in self
+                and self.bead_numbers is not None
+            ):
+                assert self.bead_numbers.dtype in _TORCH_INTEGER_DTYPES
             if "batch" in self and self.batch is not None:
                 assert self.batch.dim() == 2 and self.batch.shape[0] == self.num_nodes
                 # Check that there are the right number of cells
@@ -486,7 +493,7 @@ class AtomicData(Data):
         if AtomicDataDict.ATOMIC_NUMBERS_KEY in self:
             atomic_nums = self.atomic_numbers
         elif type_mapper is not None and type_mapper.has_chemical_symbols:
-            atomic_nums = type_mapper.untransform(self[AtomicDataDict.ATOM_TYPE_KEY])
+            atomic_nums = type_mapper.untransform(self.get(AtomicDataDict.ATOMIC_NUMBERS_KEY, self[AtomicDataDict.ATOM_TYPE_KEY]))
         else:
             warnings.warn(
                 "AtomicData.to_ase(): self didn't contain atomic numbers... using atom_type as atomic numbers instead, but this means the chemical symbols in ASE (outputs) will be wrong"
