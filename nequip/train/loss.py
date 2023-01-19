@@ -74,7 +74,7 @@ class Loss:
                             func = value[1]
                         if len(value) > 2:
                             assert isinstance(value[2], dict)
-                            train_on_delta = value[2].pop("TrainOnDelta", False)
+                            train_on_delta = value[2].get("TrainOnDelta", False)
                             if train_on_delta:
                                 self.delta_keys += [key]
                             func_params = value[2]

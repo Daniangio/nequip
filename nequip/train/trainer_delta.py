@@ -1222,9 +1222,9 @@ class TrainerDelta:
                 self.train_idcs.append(idcs[: n_train])
                 if validation_dataset is None:
                     self.val_idcs.append(idcs[n_train : n_train + n_val])
-            if validation_dataset is None:
-                validation_dataset = dataset
-                ref_validation_dataset = ref_dataset
+        if validation_dataset is None:
+            validation_dataset = dataset
+            ref_validation_dataset = ref_dataset
 
         # torch_geometric datasets inherantly support subsets using `index_select`
         indexed_datasets_train = []

@@ -231,6 +231,9 @@ def restart(config):
             elif k.startswith("early_stop"):
                 dictionary[k] = config[k]
                 logging.info(f'Update "{k}" to {dictionary[k]}')
+            elif k == "loss_coeffs":
+                dictionary[k] = config[k]
+                logging.info(f'Update "{k}" to {dictionary[k]}')
             elif isinstance(config[k], type(dictionary.get(k, ""))):
                 raise ValueError(
                     f'Key "{k}" is different in config and the result trainer.pth file. Please double check'
@@ -270,17 +273,22 @@ def restart(config):
         trainer = Trainer.from_dict(dictionary)
 
     # = Load the dataset =
-    dataset = dataset_from_config(config, prefix="dataset")
-    logging.info(f"Successfully re-loaded the data set of type {dataset}...")
+    dataset, ref_dataset = dataset_from_config(config, prefix="dataset")
+    logging.info(f"Successfully loaded the data set of type {dataset}...")
     try:
-        validation_dataset = dataset_from_config(config, prefix="validation_dataset")
+        validation_dataset, validation_ref_dataset = dataset_from_config(config, prefix="validation_dataset")
         logging.info(
-            f"Successfully re-loaded the validation data set of type {validation_dataset}..."
+            f"Successfully loaded the validation data set of type {validation_dataset}..."
         )
     except KeyError:
         # It couldn't be found
         validation_dataset = None
-    trainer.set_dataset(dataset, validation_dataset)
+        validation_ref_dataset = None
+    
+    if config.train_on_delta:
+        trainer.set_dataset(dataset, ref_dataset, validation_dataset, validation_ref_dataset)
+    else:
+        trainer.set_dataset(dataset, validation_dataset)
 
     return trainer
 
