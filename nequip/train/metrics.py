@@ -95,7 +95,7 @@ class Metrics:
             )
             self.kwargs[key][param_hash].update(kwargs)
             self.params[key][param_hash] = (reduction, params)
-            self.funcs[key][param_hash] = find_loss_function(functional, {})
+            self.funcs[key][param_hash] = find_loss_function(functional, params)
 
     def init_runstat(self, params, error: torch.Tensor):
         """

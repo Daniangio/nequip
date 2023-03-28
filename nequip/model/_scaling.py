@@ -25,9 +25,9 @@ def RescaleEnergyEtc(
         if AtomicDataDict.FORCE_KEY in model.irreps_out
         else f"dataset_{AtomicDataDict.TOTAL_ENERGY_KEY}_std",
         default_shift=None,
-        default_scale_keys=[AtomicDataDict.FORCE_KEY], # AtomicDataDict.ALL_ENERGY_KEYS,
+        default_scale_keys=AtomicDataDict.ALL_ENERGY_KEYS,
         default_shift_keys=[AtomicDataDict.TOTAL_ENERGY_KEY],
-        default_related_scale_keys=[], # [AtomicDataDict.PER_ATOM_ENERGY_KEY],
+        default_related_scale_keys=[AtomicDataDict.PER_ATOM_ENERGY_KEY],
         default_related_shift_keys=[],
     )
 
@@ -118,11 +118,11 @@ def GlobalRescale(
         model=model,
         scale_keys=[k for k in default_scale_keys if k in model.irreps_out],
         scale_by=global_scale,
-        # shift_keys=[k for k in default_shift_keys if k in model.irreps_out],
-        # shift_by=global_shift,
+        shift_keys=[k for k in default_shift_keys if k in model.irreps_out],
+        shift_by=global_shift,
         related_scale_keys=default_related_scale_keys,
-        # related_shift_keys=default_related_shift_keys,
-        # shift_trainable=config.get(f"{module_prefix}_shift_trainable", False),
+        related_shift_keys=default_related_shift_keys,
+        shift_trainable=config.get(f"{module_prefix}_shift_trainable", False),
         scale_trainable=config.get(f"{module_prefix}_scale_trainable", False),
     )
 
@@ -226,18 +226,19 @@ def PerSpeciesRescale(
                 f"Per species energy scaling was very low: {scales}. Maybe try setting {module_prefix}_scales = 1."
             )
 
-        for i, (sc, sh) in enumerate(zip(scales, shifts)):
-            logging.info(
-                f"Atomic outputs on dataset {i} are scaled by: {TypeMapper.format(sc, config.type_names)}, shifted by {TypeMapper.format(sh, config.type_names)}."
-            )
+        if scales is not None and shifts is not None:
+            for i, (sc, sh) in enumerate(zip(scales, shifts)):
+                logging.info(
+                    f"Atomic outputs on dataset {i} are scaled by: {TypeMapper.format(sc, config.type_names)}, shifted by {TypeMapper.format(sh, config.type_names)}."
+                )
 
     else:
         # Put dummy values
         # the real ones will be loaded from the state dict later
         # note that the state dict includes buffers,
         # so this is fine regardless of whether its trainable.
-        scales = [torch.tensor(1.0)] if scales is not None else None
-        shifts = [torch.tensor(0.0)] if shifts is not None else None
+        scales = 1.0 if scales is not None else None # [torch.tensor(1.0)]
+        shifts = 0.0 if shifts is not None else None # [torch.tensor(0.0)]
         # values correctly scaled according to where the come from
         # will be brought from the state dict later,
         # so what you set this to doesnt matter:

@@ -319,14 +319,18 @@ class AtomicData(Data):
 
         pos = torch.as_tensor(pos, dtype=torch.get_default_dtype())
 
-        edge_index, edge_cell_shift, cell = neighbor_list_and_relative_vec(
-            pos=pos,
-            r_max=r_max,
-            self_interaction=self_interaction,
-            strict_self_interaction=strict_self_interaction,
-            cell=cell,
-            pbc=pbc,
-        )
+        edge_index = kwargs.get(AtomicDataDict.EDGE_INDEX_KEY, None)
+        edge_cell_shift = kwargs.get(AtomicDataDict.EDGE_CELL_SHIFT_KEY, None)
+        cell = kwargs.get(AtomicDataDict.CELL_KEY, None)
+        if edge_index is None:
+            edge_index, edge_cell_shift, cell = neighbor_list_and_relative_vec(
+                pos=pos,
+                r_max=r_max,
+                self_interaction=self_interaction,
+                strict_self_interaction=strict_self_interaction,
+                cell=cell,
+                pbc=pbc,
+            )
 
         # Make torch tensors for data:
         if cell is not None:
@@ -493,7 +497,10 @@ class AtomicData(Data):
         if AtomicDataDict.ATOMIC_NUMBERS_KEY in self:
             atomic_nums = self.atomic_numbers
         elif type_mapper is not None and type_mapper.has_chemical_symbols:
-            atomic_nums = type_mapper.untransform(self.get(AtomicDataDict.ATOMIC_NUMBERS_KEY, self[AtomicDataDict.ATOM_TYPE_KEY]))
+            atomic_numbers = self[AtomicDataDict.ATOMIC_NUMBERS_KEY]
+            if atomic_numbers is None:
+                atomic_numbers = self[AtomicDataDict.ATOM_TYPE_KEY]
+            atomic_nums = type_mapper.untransform(atomic_numbers)
         else:
             warnings.warn(
                 "AtomicData.to_ase(): self didn't contain atomic numbers... using atom_type as atomic numbers instead, but this means the chemical symbols in ASE (outputs) will be wrong"
@@ -501,7 +508,7 @@ class AtomicData(Data):
             atomic_nums = self[AtomicDataDict.ATOM_TYPE_KEY]
         pbc = getattr(self, AtomicDataDict.PBC_KEY, None)
         cell = getattr(self, AtomicDataDict.CELL_KEY, None)
-        batch = getattr(self, AtomicDataDict.BATCH_KEY, None)
+        batch = getattr(self, AtomicDataDict.ORIG_BATCH_KEY, getattr(self, AtomicDataDict.BATCH_KEY, None))
         batch_filtered = batch[torch.isin(batch, torch.nonzero(filter_idcs).reshape(-1))] if batch is not None else None
         energy = getattr(self, AtomicDataDict.TOTAL_ENERGY_KEY, None)
         energies = getattr(self, AtomicDataDict.PER_ATOM_ENERGY_KEY, None)

@@ -7,6 +7,7 @@ enable wandb resume
 make an interface with ray
 
 """
+
 import sys
 import inspect
 import logging
@@ -236,6 +237,8 @@ class Trainer:
         use_ema: bool = False,
         ema_decay: float = 0.999,
         ema_use_num_updates=True,
+        prod_for = 1,
+        prod_every = 0,
         exclude_keys: list = [],
         batch_size: int = 5,
         validation_batch_size: int = 5,
@@ -246,6 +249,9 @@ class Trainer:
         train_idcs: Optional[Union[list, list[list]]] = None,
         val_idcs: Optional[Union[list, list[list]]] = None,
         train_val_split: str = "random",
+        batch_max_atoms: int = 3000,
+        batch_max_edges: int = 100000,
+        max_atoms_correction_step: int = 50,
         init_callbacks: list = [],
         end_of_epoch_callbacks: list = [],
         end_of_batch_callbacks: list = [],
@@ -684,7 +690,7 @@ class Trainer:
         else:
             config = Config.from_file(traindir + "/config.yaml")
 
-        model = model_from_config(
+        model: torch.nn.Module = model_from_config(
             config=config,
             initialize=False,
         )
@@ -699,7 +705,7 @@ class Trainer:
                 traindir + "/" + model_name, map_location=device
             )
             # model_state_dict.pop('model.func.per_species_rescale.shifts')
-            model.load_state_dict(model_state_dict), #strict=False)
+            model.load_state_dict(model_state_dict) # strict=False)
 
         return model, config
 
@@ -802,6 +808,36 @@ class Trainer:
         data = data.to(self.torch_device)
         data = AtomicData.to_AtomicDataDict(data)
 
+        # Remove edges of atoms whose result is NaN
+        for key in self.loss.coeffs:
+            if self.loss.funcs[key].ignore_nan:
+                if key == AtomicDataDict.PER_ATOM_ENERGY_KEY:
+                    not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(~torch.isnan(data[key].flatten())).flatten())
+                    data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
+                    data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+                    data[AtomicDataDict.ORIG_BATCH_KEY] = data[AtomicDataDict.BATCH_KEY].clone()
+                    data[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][~torch.isnan(data[key]).flatten()]
+        
+        # Limit maximum batch size to avoid CUDA Out of Memory
+        x = data[AtomicDataDict.EDGE_INDEX_KEY]
+        y = x.clone()
+        node_center_idcs = x[0].unique()
+        max_atoms_correction = 0
+        while y.shape[1] > self.batch_max_edges:
+            batch_atom_idcs = torch.multinomial(
+                node_center_idcs.float(),
+                num_samples=min(len(node_center_idcs), self.batch_max_atoms - max_atoms_correction),
+                replacement=False
+            ).sort().values
+            batch_size_edge_filter = torch.isin(x[0], batch_atom_idcs)
+            y = x[:, batch_size_edge_filter]
+            max_atoms_correction += self.max_atoms_correction_step
+
+        if max_atoms_correction > 0:
+            data[AtomicDataDict.EDGE_INDEX_KEY] = y
+            data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_size_edge_filter]
+            data[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][batch_atom_idcs]
+
         data_unscaled = data
         for layer in self.rescale_layers:
             # This means that self.model is RescaleOutputs
@@ -831,6 +867,10 @@ class Trainer:
             # see https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#use-parameter-grad-none-instead-of-model-zero-grad-or-optimizer-zero-grad
             self.optim.zero_grad(set_to_none=True)
             loss.backward()
+
+            # for p in self.model.parameters():
+            #     while p.grad.abs().max() < 1e-7:
+            #         p.grad = p.grad * 1e1
 
             # See https://stackoverflow.com/a/56069467
             # Has to happen after .backward() so there are grads to clip
@@ -897,6 +937,7 @@ class Trainer:
         self.metrics.to(self.torch_device)
 
     def epoch_step(self):
+        self.model.prod(max(0, self.iepoch) % (self.prod_for + self.prod_every) < self.prod_every)
 
         dataloaders = {TRAIN: self.dl_train, VALIDATION: self.dl_val}
         categories = [TRAIN, VALIDATION] if self.iepoch >= 0 else [VALIDATION]
@@ -1159,9 +1200,6 @@ class Trainer:
         `validation_dataset` is provided, it will be used.
         """
 
-        assert len(self.n_train) == len(dataset.datasets)
-        assert len(self.n_val) == len(dataset.datasets)
-
         if self.train_idcs is None or self.val_idcs is None:
             self.train_idcs, self.val_idcs = [], []
             # Sample both from `dataset`:
@@ -1183,15 +1221,12 @@ class Trainer:
                     self.val_idcs.append(idcs[:n_val])
 
             # If validation_dataset is None, Sample both from `dataset`
-            for _dataset, n_train, n_val in zip(dataset.datasets, self.n_train, self.n_val):
+            for _index, (_dataset, n_train) in enumerate(zip(dataset.datasets, self.n_train)):
                 total_n = len(_dataset)
-                if validation_dataset is None and (n_train + n_val) > total_n:
-                    raise ValueError(
-                        "too little data for training and validation. please reduce n_train and n_val"
-                    )
+
                 if n_train > total_n:
                     raise ValueError(
-                        "too little data for training. please reduce n_train"
+                        f"too little data for training. please reduce n_train. n_train: {n_train} total: {total_n}"
                     )
 
                 if self.train_val_split == "random":
@@ -1205,9 +1240,18 @@ class Trainer:
 
                 self.train_idcs.append(idcs[: n_train])
                 if validation_dataset is None:
+                    assert len(self.n_train) == len(self.n_val)
+                    n_val = self.n_val[_index]
+                    if (n_train + n_val) > total_n:
+                        raise ValueError(
+                            f"too little data for training and validation. please reduce n_train and n_val. n_train: {n_train} n_val: {n_val} total: {total_n}"
+                        )
                     self.val_idcs.append(idcs[n_train : n_train + n_val])
-            if validation_dataset is None:
-                validation_dataset = dataset
+        if validation_dataset is None:
+            validation_dataset = dataset
+        
+        assert len(self.n_train) == len(dataset.datasets)
+        assert len(self.n_val) == len(validation_dataset.datasets)
 
         # torch_geometric datasets inherantly support subsets using `index_select`
         indexed_datasets_train = []

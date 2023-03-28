@@ -1177,7 +1177,7 @@ class TrainerDelta:
         """
 
         assert len(self.n_train) == len(dataset.datasets)
-        assert len(self.n_val) == len(dataset.datasets)
+        assert len(self.n_val) == len(validation_dataset.datasets)
 
         if self.train_idcs is None or self.val_idcs is None:
             self.train_idcs, self.val_idcs = [], []

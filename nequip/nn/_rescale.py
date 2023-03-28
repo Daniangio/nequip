@@ -30,25 +30,25 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
     """
 
     scale_keys: List[str]
-    # shift_keys: List[str]
+    shift_keys: List[str]
     related_scale_keys: List[str]
     related_shift_keys: List[str]
     scale_trainble: bool
     rescale_trainable: bool
 
     has_scale: bool
-    # has_shift: bool
+    has_shift: bool
 
     def __init__(
         self,
         model: GraphModuleMixin,
         scale_keys: Union[Sequence[str], str] = [],
-        # shift_keys: Union[Sequence[str], str] = [],
-        # related_shift_keys: Union[Sequence[str], str] = [],
+        shift_keys: Union[Sequence[str], str] = [],
+        related_shift_keys: Union[Sequence[str], str] = [],
         related_scale_keys: Union[Sequence[str], str] = [],
         scale_by=None,
-        # shift_by=None,
-        # shift_trainable: bool = False,
+        shift_by=None,
+        shift_trainable: bool = False,
         scale_trainable: bool = False,
         irreps_in: dict = {},
     ):
@@ -56,7 +56,7 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
 
         self.model = model
         scale_keys = [scale_keys] if isinstance(scale_keys, str) else scale_keys
-        # shift_keys = [shift_keys] if isinstance(shift_keys, str) else shift_keys
+        shift_keys = [shift_keys] if isinstance(shift_keys, str) else shift_keys
         all_keys = set(scale_keys)# .union(shift_keys)
 
         # Check irreps:
@@ -70,19 +70,19 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
                 raise KeyError(
                     f"Asked to scale or shift '{k}', but '{k}' is not in the outputs of the provided `model`."
                 )
-        # for k in shift_keys:
-        #     if model.irreps_out[k] is not None and model.irreps_out[k].lmax > 0:
-        #         raise ValueError(
-        #             f"It doesn't make sense to shift non-scalar target '{k}'."
-        #         )
+        for k in shift_keys:
+            if model.irreps_out[k] is not None and model.irreps_out[k].lmax > 0:
+                raise ValueError(
+                    f"It doesn't make sense to shift non-scalar target '{k}'."
+                )
 
         irreps_in.update(model.irreps_in)
         self._init_irreps(irreps_in=irreps_in, irreps_out=model.irreps_out)
 
         self.scale_keys = list(scale_keys)
-        # self.shift_keys = list(shift_keys)
+        self.shift_keys = list(shift_keys)
         self.related_scale_keys = list(set(related_scale_keys).union(scale_keys))
-        # self.related_shift_keys = list(set(related_shift_keys).union(shift_keys))
+        self.related_shift_keys = list(set(related_shift_keys).union(shift_keys))
 
         self.has_scale = scale_by is not None
         self.scale_trainble = scale_trainable
@@ -100,21 +100,21 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
             # register dummy for TorchScript
             self.register_buffer("scale_by", torch.Tensor())
 
-        # self.has_shift = shift_by is not None
-        # self.rescale_trainable = shift_trainable
-        # if self.has_shift:
-        #     shift_by = torch.as_tensor(shift_by)
-        #     if self.rescale_trainable:
-        #         self.shift_by = torch.nn.Parameter(shift_by)
-        #     else:
-        #         self.register_buffer("shift_by", shift_by)
-        # elif self.rescale_trainable:
-        #     raise ValueError(
-        #         "Asked for a shift_trainable, but this RescaleOutput has no shift (`shift_by = None`)"
-        #     )
-        # else:
-        #     # register dummy for TorchScript
-        #     self.register_buffer("shift_by", torch.Tensor())
+        self.has_shift = shift_by is not None
+        self.rescale_trainable = shift_trainable
+        if self.has_shift:
+            shift_by = torch.as_tensor(shift_by)
+            if self.rescale_trainable:
+                self.shift_by = torch.nn.Parameter(shift_by)
+            else:
+                self.register_buffer("shift_by", shift_by)
+        elif self.rescale_trainable:
+            raise ValueError(
+                "Asked for a shift_trainable, but this RescaleOutput has no shift (`shift_by = None`)"
+            )
+        else:
+            # register dummy for TorchScript
+            self.register_buffer("shift_by", torch.Tensor())
 
         # Finally, we tell all the modules in the model that there is rescaling
         # This allows them to update parameters, like physical constants with units,
@@ -144,9 +144,9 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
             if self.has_scale:
                 for field in self.scale_keys:
                     data[field] = data[field] * self.scale_by
-            # if self.has_shift:
-            #     for field in self.shift_keys:
-            #         data[field] = data[field] + self.shift_by
+            if self.has_shift:
+                for field in self.shift_keys:
+                    data[field] = data[field] + self.shift_by
             return data
 
     @torch.jit.export
@@ -173,10 +173,10 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
                 for field in self.scale_keys:
                     if field in data:
                         data[field] = data[field] * self.scale_by
-            # if self.has_shift:
-            #     for field in self.shift_keys:
-            #         if field in data:
-            #             data[field] = data[field] + self.shift_by
+            if self.has_shift:
+                for field in self.shift_keys:
+                    if field in data:
+                        data[field] = data[field] + self.shift_by
             return data
 
     @torch.jit.export
@@ -198,10 +198,10 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
         data = data.copy()
         if self.training or force_process:
             # To invert, -shift then divide by scale
-            # if self.has_shift:
-            #     for field in self.shift_keys:
-            #         if field in data:
-            #             data[field] = data[field] - self.shift_by
+            if self.has_shift:
+                for field in self.shift_keys:
+                    if field in data:
+                        data[field] = data[field] - self.shift_by
             if self.has_scale:
                 for field in self.scale_keys:
                     if field in data:

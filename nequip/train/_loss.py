@@ -7,7 +7,6 @@ from torch_runstats.scatter import scatter, scatter_mean
 from nequip.data import AtomicDataDict
 from nequip.utils import instantiate_from_cls_name
 
-
 class SimpleLoss:
     """wrapper to compute weighted loss function
 
@@ -45,16 +44,17 @@ class SimpleLoss:
         mean: bool = True,
     ):
         # zero the nan entries
-        has_nan = self.ignore_nan and torch.isnan(ref[key].mean())
+        ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device))
+        has_nan = self.ignore_nan and torch.isnan(ref_key.sum())
         if has_nan:
             not_nan = (ref[key] == ref[key]).int()
-            loss = self.func(pred[key], torch.nan_to_num(ref[key], nan=0.0)) * not_nan
+            loss = self.func(torch.nan_to_num(pred[key], nan=0.0), torch.nan_to_num(ref_key, nan=0.0)) * not_nan
             if mean:
                 return loss.sum() / not_nan.sum()
             else:
                 return loss
         else:
-            loss = self.func(pred[key], ref[key])
+            loss = self.func(pred[key], ref_key)
             if mean:
                 return loss.mean()
             else:
@@ -70,13 +70,14 @@ class PerAtomLoss(SimpleLoss):
         mean: bool = True,
     ):
         # zero the nan entries
-        has_nan = self.ignore_nan and torch.isnan(ref[key].sum())
+        ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device))
+        has_nan = self.ignore_nan and torch.isnan(ref_key.sum())
         N = torch.bincount(ref[AtomicDataDict.BATCH_KEY])
         N = N.reshape((-1, 1))
         if has_nan:
             not_nan = (ref[key] == ref[key]).int()
             loss = (
-                self.func(pred[key], torch.nan_to_num(ref[key], nan=0.0)) * not_nan / N
+                self.func(pred[key], torch.nan_to_num(ref_key, nan=0.0)) * not_nan / N
             )
             if self.func_name == "MSELoss":
                 loss = loss / N
@@ -86,7 +87,7 @@ class PerAtomLoss(SimpleLoss):
             else:
                 return loss
         else:
-            loss = self.func(pred[key], ref[key])
+            loss = self.func(pred[key], ref_key)
             loss = loss / N
             if self.func_name == "MSELoss":
                 loss = loss / N
@@ -114,15 +115,16 @@ class PerSpeciesLoss(SimpleLoss):
         if not mean:
             raise NotImplementedError("Cannot handle this yet")
 
-        has_nan = self.ignore_nan and torch.isnan(ref[key].mean())
+        ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device))
+        has_nan = self.ignore_nan and torch.isnan(ref_key.sum())
 
         if has_nan:
-            not_nan = (ref[key] == ref[key]).int()
+            not_nan = (ref_key == ref_key).int()
             per_atom_loss = (
-                self.func(pred[key], torch.nan_to_num(ref[key], nan=0.0)) * not_nan
+                self.func(pred[key], torch.nan_to_num(ref_key, nan=0.0)) * not_nan
             )
         else:
-            per_atom_loss = self.func(pred[key], ref[key])
+            per_atom_loss = self.func(pred[key], ref_key)
 
         reduce_dims = tuple(i + 1 for i in range(len(per_atom_loss.shape) - 1))
 

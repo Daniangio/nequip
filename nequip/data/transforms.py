@@ -147,7 +147,8 @@ class TypeMapper:
             raise ValueError(
                 f"Data included atomic numbers {bad_set} that are not part of the atomic number -> type mapping!"
             )
-
+        if -1 in self._Z_to_index[atomic_numbers - self._min_Z].unique():
+            print(atomic_numbers.unique())
         return self._Z_to_index[atomic_numbers - self._min_Z]
 
     def untransform(self, atom_types):

@@ -48,14 +48,13 @@ class Loss:
         self.keys = []
         self.delta_keys = []
 
-        mseloss = find_loss_function("MSELoss", {})
         if isinstance(coeffs, str):
             self.coeffs[coeffs] = 1.0
-            self.funcs[coeffs] = mseloss
+            self.funcs[coeffs] = find_loss_function("MSELoss", {})
         elif isinstance(coeffs, list):
             for key in coeffs:
                 self.coeffs[key] = 1.0
-                self.funcs[key] = mseloss
+                self.funcs[key] = find_loss_function("MSELoss", {})
         elif isinstance(coeffs, dict):
             for key, value in coeffs.items():
                 logging.debug(f" parsing {key} {value}")

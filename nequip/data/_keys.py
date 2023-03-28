@@ -68,6 +68,7 @@ ALL_ENERGY_KEYS: Final[List[str]] = [
 ]
 
 BATCH_KEY: Final[str] = "batch"
+ORIG_BATCH_KEY: Final[str] = "orig_batch"
 
 # Make a list of allowed keys
 ALLOWED_KEYS: List[str] = [

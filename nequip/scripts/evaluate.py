@@ -7,6 +7,7 @@ import textwrap
 from pathlib import Path
 import contextlib
 from tqdm.auto import tqdm
+from nequip.data import AtomicDataDict
 
 import ase.io
 
@@ -274,8 +275,13 @@ def main(args=None, running_as_script: bool = True):
     logger.info(
         f"Loading {'original ' if dataset_is_from_training else ''}dataset...",
     )
+    defaults = {"r_max": model_r_max}
+    if not loaded_deployed_model:
+        defaults.update({
+            "root": model_root
+        })
     dataset_config = Config.from_file(
-        str(args.dataset_config), defaults={"root": model_root, "r_max": model_r_max}
+        str(args.dataset_config), defaults=defaults
     )
     if dataset_config["r_max"] != model_r_max:
         raise RuntimeError(
@@ -429,12 +435,25 @@ def main(args=None, running_as_script: bool = True):
             this_batch_test_indexes = test_idcs[
                 batch_i * batch_size : (batch_i + 1) * batch_size
             ]
-            datas = [dataset[int(idex)] for idex in this_batch_test_indexes]
+            try:
+                datas = [dataset[int(idex)] for idex in this_batch_test_indexes]
+            except ValueError: # Most probably an atom in pdb that is missing in model
+                batch_i += 1
+                prog.update(len(this_batch_test_indexes))
+                continue
             if len(datas) == 0:
                 break
             batch = c.collate(datas)
             batch = batch.to(device)
             batch_ = AtomicData.to_AtomicDataDict(batch)
+
+            if AtomicDataDict.PER_ATOM_ENERGY_KEY in batch_:
+                not_nan_edge_filter = torch.isin(batch_[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(~torch.isnan(batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY].flatten())).flatten())
+                batch_[AtomicDataDict.EDGE_INDEX_KEY] = batch_[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
+                batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+                batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY].clone()
+                batch_[AtomicDataDict.BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY][~torch.isnan(batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY]).flatten()]
+
             out = model(batch_)
 
             with torch.no_grad():
@@ -478,7 +497,7 @@ def main(args=None, running_as_script: bool = True):
                 # Accumulate metrics
                 if do_metrics:
                     try:
-                        metrics(out, batch)
+                        metrics(out, batch.to_dict())
                         display_bar.set_description_str(
                             " | ".join(
                                 f"{k} = {v:4.4f}"
