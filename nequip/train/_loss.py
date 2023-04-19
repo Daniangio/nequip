@@ -61,6 +61,24 @@ class SimpleLoss:
                 return loss
 
 
+class BatchAverageLoss(SimpleLoss):
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+    ):
+        # zero the nan entries
+        ref_key = ref.get(key, torch.zeros((1,), device=pred[key].device))
+        has_nan = self.ignore_nan and torch.isnan(ref_key.sum())
+        assert not has_nan
+        batch = ref[AtomicDataDict.BATCH_KEY]
+        N = torch.bincount(batch)
+        loss = self.func(scatter(pred[key], batch, dim=0) / N, torch.nan_to_num(ref_key, nan=0.0)).mean()
+        assert loss.shape == pred[key].shape
+        return loss
+
+
 class PerAtomLoss(SimpleLoss):
     def __call__(
         self,
@@ -173,6 +191,7 @@ def find_loss_function(name: str, params):
     wrapper_list = dict(
         perspecies=PerSpeciesLoss,
         peratom=PerAtomLoss,
+        batchaverage=BatchAverageLoss,
     )
 
     if isinstance(name, str):
