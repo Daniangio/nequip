@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Optional
 
 import torch
@@ -7,17 +8,25 @@ from nequip.utils import Config
 from nequip.data import AtomicDataset, AtomicDataDict
 
 
-def _add_avg_num_neighbors_helper(data):
+def _add_avg_num_neighbors_helper(data, graph_is_undirected: bool = True):
     counts = torch.unique(
         data[AtomicDataDict.EDGE_INDEX_KEY][0],
         sorted=True,
         return_counts=True,
     )[1]
-    # in case the cutoff is small and some nodes have no neighbors,
+    # By default, assume that the graph is undirected, hence if a node does
+    # not appear in the source index, it means that it has 0 neighbours.
+    # If graph_is_undirected is False, ignore atoms with 0 neighbours because
+    # the graph is directed and we simply are counting the number of incoming edges
+    # in nodes that have at least one incoming edge
+    
+    # When graph is undirected, in case the cutoff is small and some nodes have no neighbors,
     # we need to pad `counts` up to the right length
     counts = torch.nn.functional.pad(
         counts, pad=(0, len(data[AtomicDataDict.POSITIONS_KEY]) - len(counts))
     )
+    if not graph_is_undirected:
+        counts[counts == 0] = counts[counts > 0].float().mean().int()
     return (counts, "node")
 
 
@@ -41,7 +50,7 @@ def add_avg_num_neighbors(
         cnns, anns, var_nns = [], [], []
         for ds in dataset.datasets:
             cnn, ann, var_nn = ds.statistics(
-                fields=[_add_avg_num_neighbors_helper],
+                fields=[partial(_add_avg_num_neighbors_helper, graph_is_undirected=not config.get("directed_graph", False))],
                 modes=["count_mean_std"],
                 stride=config.get("dataset_statistics_stride", 1),
             )[0]

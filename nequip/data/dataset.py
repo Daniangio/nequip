@@ -151,6 +151,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         url: Optional[str] = None,
         force_fixed_keys: List[str] = [],
         extra_fixed_fields: Dict[str, Any] = {},
+        force_index_keys: List[str] = [AtomicDataDict.EDGE_INDEX_KEY],
         include_frames: Optional[List[int]] = None,
         type_mapper: Optional[TypeMapper] = None,
     ):
@@ -163,10 +164,14 @@ class AtomicInMemoryDataset(AtomicDataset):
         force_fixed_keys = set(force_fixed_keys).union(
             getattr(type(self), "FORCE_FIXED_KEYS", [])
         )
+        force_index_keys = set(force_index_keys).union(
+            getattr(type(self), "FORCE_INDEX_KEYS", [])
+        )
         self.url = getattr(type(self), "URL", url)
 
         self.force_fixed_keys = force_fixed_keys
         self.extra_fixed_fields = extra_fixed_fields
+        self.force_index_keys = force_index_keys
         self.include_frames = include_frames
 
         self.data = None
@@ -278,6 +283,11 @@ class AtomicInMemoryDataset(AtomicDataset):
             for key in self.force_fixed_keys:
                 if key in fields:
                     fixed_fields[key] = fields.pop(key)[0]
+            
+            index_fields = {}
+            for key in self.force_index_keys:
+                if key in fields:
+                    index_fields[key] = fields.pop(key)
 
             # check dimesionality
             num_examples = set([len(a) for a in fields.values()])
@@ -302,7 +312,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                 assert AtomicDataDict.POSITIONS_KEY in all_keys
 
             data_list = [
-                constructor(**{**{f: v[i] for f, v in fields.items()}, **fixed_fields})
+                constructor(**{**{f: v[i] for f, v in fields.items()}, **fixed_fields, **index_fields})
                 for i in include_frames
             ]
 
@@ -531,7 +541,7 @@ class AtomicInMemoryDataset(AtomicDataset):
 
             elif ana_mode.startswith("per_species_"):
                 # per-species
-                algorithm_kwargs = kwargs.pop(field + ana_mode, {})
+                algorithm_kwargs = kwargs.pop(field + "_" + ana_mode, {})
 
                 ana_mode = ana_mode[len("per_species_") :]
 
@@ -644,14 +654,23 @@ class AtomicInMemoryDataset(AtomicDataset):
             arr = arr.type(torch.get_default_dtype())
 
             if ana_mode == "mean_std":
-                mean = scatter_mean(arr, atom_types, dim=0)
+                # Trick to perform scatter mean ignoring nan values
+                notnan_idcs = (~torch.isnan(arr)).prod(dim=1)
+                mean = torch.zeros((N.shape[1], arr.shape[1]), dtype=arr.dtype, device=arr.device)
+                mean[:atom_types[torch.nonzero(notnan_idcs).flatten()].max().item()+1] += scatter_mean(arr[torch.nonzero(notnan_idcs).flatten()], atom_types[torch.nonzero(notnan_idcs).flatten()], dim=0)
                 assert mean.shape[1:] == arr.shape[1:]  # [N, dims] -> [type, dims]
                 assert len(mean) == N.shape[1]
-                std = scatter_std(arr, atom_types, dim=0, unbiased=unbiased)
+
+                # Trick to perform scatter std ignoring nan values
+                std = torch.zeros((N.shape[1], arr.shape[1]), dtype=arr.dtype, device=arr.device)
+                std[:atom_types[torch.nonzero(notnan_idcs).flatten()].max().item()+1] += scatter_std(arr[torch.nonzero(notnan_idcs).flatten()], atom_types[torch.nonzero(notnan_idcs).flatten()], dim=0, unbiased=unbiased)
                 assert std.shape == mean.shape
                 return mean, std
             elif ana_mode == "rms":
-                square = scatter_mean(arr.square(), atom_types, dim=0)
+                # Trick to perform scatter mean ignoring nan values
+                notnan_idcs = (~torch.isnan(arr)).prod(dim=1)
+                square = torch.zeros((N.shape[1], arr.shape[1]), dtype=arr.dtype, device=arr.device)
+                square[:atom_types[torch.nonzero(notnan_idcs).flatten()].max().item()+1] += scatter_mean(arr.square()[torch.nonzero(notnan_idcs).flatten()], atom_types[torch.nonzero(notnan_idcs).flatten()], dim=0)
                 assert square.shape[1:] == arr.shape[1:]  # [N, dims] -> [type, dims]
                 assert len(square) == N.shape[1]
                 dims = len(square.shape) - 1
@@ -772,13 +791,18 @@ class NpzDataset(AtomicInMemoryDataset):
             if intkey in mapped:
                 mapped[intkey] = mapped[intkey].astype(np.int64)
 
-        fields = {k: v for k, v in mapped.items() if k not in self.npz_fixed_field_keys}
+        fields = {k: fix_batch_dim(v) for k, v in mapped.items() if k not in self.npz_fixed_field_keys}
         # note that we don't deal with extra_fixed_fields here; AtomicInMemoryDataset does that.
         fixed_fields = {
             k: v for k, v in mapped.items() if k in self.npz_fixed_field_keys
         }
         fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = np.array(self.dataset_idx)
         return fields, fixed_fields
+
+def fix_batch_dim(arr):
+    if len(arr.shape) == 0:
+        return arr.reshape(1)
+    return arr
 
 
 def _ase_dataset_reader(
