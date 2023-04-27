@@ -67,16 +67,32 @@ class BatchAverageLoss(SimpleLoss):
         pred: dict,
         ref: dict,
         key: str,
-    ):
-        # zero the nan entries
-        ref_key = ref.get(key, torch.zeros((1,), device=pred[key].device))
+        mean: bool = True,
+    ):    
+        ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device))
         has_nan = self.ignore_nan and torch.isnan(ref_key.sum())
-        assert not has_nan
-        batch = ref[AtomicDataDict.BATCH_KEY]
-        N = torch.bincount(batch)
-        loss = self.func(scatter(pred[key], batch, dim=0) / N, torch.nan_to_num(ref_key, nan=0.0)).mean()
-        assert loss.shape == pred[key].shape
-        return loss
+        N = torch.bincount(ref[AtomicDataDict.BATCH_KEY])
+        N = N.reshape((-1, 1))
+        if has_nan:
+            not_nan = (ref[key] == ref[key]).int()
+            loss = (
+                self.func((pred[key][torch.nonzero(not_nan, as_tuple=True)]).sum(), (ref_key[torch.nonzero(not_nan, as_tuple=True)]).sum()) / N
+            )
+            if self.func_name == "MSELoss":
+                loss = loss / N
+            if mean:
+                return loss.sum() / not_nan.sum()
+            else:
+                return loss
+        else:
+            loss = self.func(pred[key].sum(), ref_key.sum())
+            loss = loss / N
+            if self.func_name == "MSELoss":
+                loss = loss / N
+            if mean:
+                return loss.mean()
+            else:
+                return loss
 
 
 class PerAtomLoss(SimpleLoss):

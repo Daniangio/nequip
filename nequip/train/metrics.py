@@ -184,6 +184,7 @@ class Metrics:
                 else:
                     error_N = error
 
+                error_N[error_N == 0.] = torch.nan # Turn 0. errors to nan
                 if stat.dim == () and not per_species:
                     metrics[(key, param_hash)] = stat.accumulate_batch(
                         error_N.flatten(), **params
