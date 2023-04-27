@@ -251,6 +251,7 @@ class Trainer:
         train_val_split: str = "random",
         batch_max_atoms: int = 3000,
         batch_max_edges: int = 100000,
+        batch_max_atomic_energies: int = 2000,
         max_atoms_correction_step: int = 50,
         init_callbacks: list = [],
         end_of_epoch_callbacks: list = [],
@@ -814,30 +815,63 @@ class Trainer:
                 if key == AtomicDataDict.PER_ATOM_ENERGY_KEY:
                     not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(~torch.isnan(data[key].flatten())).flatten())
                     data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-                    data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+                    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
+                        data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
                     data[AtomicDataDict.ORIG_BATCH_KEY] = data[AtomicDataDict.BATCH_KEY].clone()
                     data[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][~torch.isnan(data[key]).flatten()]
         
         # Limit maximum batch size to avoid CUDA Out of Memory
         x = data[AtomicDataDict.EDGE_INDEX_KEY]
         y = x.clone()
+        z = data.get(AtomicDataDict.PER_ATOM_ENERGY_KEY, None).clone()
         node_center_idcs = x[0].unique()
         max_atoms_correction = 0
-        while y.shape[1] > self.batch_max_edges:
+        z_mask = None
+
+        while y.shape[1] > self.batch_max_edges or (z is not None and (~torch.isnan(z)).sum() > self.batch_max_atomic_energies):
             batch_atom_idcs = torch.multinomial(
                 node_center_idcs.float(),
                 num_samples=min(len(node_center_idcs), self.batch_max_atoms - max_atoms_correction),
                 replacement=False
             ).sort().values
-            batch_size_edge_filter = torch.isin(x[0], batch_atom_idcs)
+            batch_size_edge_filter = torch.isin(x[0], x[0][batch_atom_idcs].unique())
             y = x[:, batch_size_edge_filter]
+            z_mask = torch.ones_like(z, dtype=torch.bool)
+            z_mask[y[0].unique()] = False
+            z = data.get(AtomicDataDict.PER_ATOM_ENERGY_KEY, None).clone()
+            z[z_mask] = torch.nan
             max_atoms_correction += self.max_atoms_correction_step
+        del x
 
         if max_atoms_correction > 0:
             data[AtomicDataDict.EDGE_INDEX_KEY] = y
             data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_size_edge_filter]
-            data[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][batch_atom_idcs]
+            data[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.ORIG_BATCH_KEY][y[0].unique()]
+            if z is not None and z_mask is not None:
+                data[AtomicDataDict.PER_ATOM_ENERGY_KEY] = z
+        
+        # Remove all atoms that do not appear in edges and update edge indices
+        edge_index = data[AtomicDataDict.EDGE_INDEX_KEY]
 
+        edge_index_unique = edge_index.unique()
+        data[AtomicDataDict.POSITIONS_KEY] = data[AtomicDataDict.POSITIONS_KEY][edge_index_unique]
+        data[AtomicDataDict.ATOMIC_NUMBERS_KEY] = data[AtomicDataDict.ATOMIC_NUMBERS_KEY][edge_index_unique]
+        if AtomicDataDict.ATOM_TYPE_KEY in data:
+            data[AtomicDataDict.ATOM_TYPE_KEY] = data[AtomicDataDict.ATOM_TYPE_KEY][edge_index_unique]
+        if AtomicDataDict.PER_ATOM_ENERGY_KEY in data:
+            data[AtomicDataDict.PER_ATOM_ENERGY_KEY] = data[AtomicDataDict.PER_ATOM_ENERGY_KEY][edge_index_unique]
+
+        last_idx = -1
+        updated_edge_index = edge_index.clone()
+        for idx in edge_index_unique:
+            if idx > last_idx + 1:
+                updated_edge_index[edge_index >= idx] -= idx - last_idx - 1
+            last_idx = idx
+        data[AtomicDataDict.EDGE_INDEX_KEY] = updated_edge_index
+        del edge_index
+        del edge_index_unique
+
+        # Rescale data
         data_unscaled = data
         for layer in self.rescale_layers:
             # This means that self.model is RescaleOutputs
@@ -1201,6 +1235,10 @@ class Trainer:
         """
 
         if self.train_idcs is None or self.val_idcs is None:
+            if self.n_train is None:
+                self.n_train = [len(ds) for ds in dataset.datasets]
+            if self.n_val is None:
+                self.n_val = [len(ds) for ds in validation_dataset.datasets]
             self.train_idcs, self.val_idcs = [], []
             # Sample both from `dataset`:
             if validation_dataset is not None:

@@ -322,7 +322,7 @@ def _compute_stats(
             stat_fields += [field]
             if stat_mode.startswith("per_species_"):
                 if field in kwargs:
-                    input_kwargs[field + stat_mode] = kwargs[field]
+                    input_kwargs[field + "_" + stat_mode] = kwargs[field]
         tuple_ids += [tuple_id_map[stat]]
 
     dataset_values = []
