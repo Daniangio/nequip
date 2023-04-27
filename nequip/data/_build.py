@@ -1,5 +1,8 @@
 import inspect
 from importlib import import_module
+from typing import Dict, List
+from os import listdir
+from os.path import isfile, join
 
 from torch.utils.data import ConcatDataset
 from nequip import data
@@ -28,28 +31,29 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
     """
 
     instances = []
-    config_dataset_list = config.get(f"{prefix}_list", [config])
+    dataset_idx_offset = 0
+    config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
     for dataset_idx, _config_dataset in enumerate(config_dataset_list):
-        _config: dict = config.as_dict()
-        _config.update(_config_dataset)
-        _config[AtomicDataDict.DATASET_INDEX_KEY] = dataset_idx
-
-        config_dataset = _config.get(prefix, None)
-        if config_dataset is None:
+        is_folder = False
+        config_dataset_type = _config_dataset.get(prefix, None)
+        if config_dataset_type is None:
             raise KeyError(f"Dataset with prefix `{prefix}` isn't present in this config!")
-
-        if inspect.isclass(config_dataset):
-            # user define class
-            class_name = config_dataset
+        
+        if config_dataset_type.split("_")[0] == "folder":
+            is_folder = True
+            config_dataset_type = config_dataset_type.split("_")[1]
+        
+        if inspect.isclass(config_dataset_type):
+            class_name = config_dataset_type
         else:
             try:
-                module_name = ".".join(config_dataset.split(".")[:-1])
-                class_name = ".".join(config_dataset.split(".")[-1:])
+                module_name = ".".join(config_dataset_type.split(".")[:-1])
+                class_name = ".".join(config_dataset_type.split(".")[-1:])
                 class_name = getattr(import_module(module_name), class_name)
             except Exception:
                 # ^ TODO: don't catch all Exception
                 # default class defined in nequip.data or nequip.dataset
-                dataset_name = config_dataset.lower()
+                dataset_name = config_dataset_type.lower()
 
                 class_name = None
                 for k, v in inspect.getmembers(data, inspect.isclass):
@@ -63,6 +67,15 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
 
         if class_name is None:
             raise NameError(f"dataset type {dataset_name} does not exists")
+
+        f_name = _config_dataset.get(f"{prefix}_file_name")
+        if is_folder:
+            dataset_file_names = [join(f_name, f) for f in listdir(f_name) if isfile(join(f_name, f))]
+        else:
+            dataset_file_names = [f_name]
+        
+        _config: dict = config.as_dict()
+        _config.update(_config_dataset)
 
         # if dataset r_max is not found, use the universal r_max
         eff_key = "extra_fixed_fields"
@@ -80,18 +93,23 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         # Build a TypeMapper from the config
         type_mapper, _ = instantiate(TypeMapper, prefix=prefix, optional_args=_config)
 
-        # Register fields:
-        # This might reregister fields, but that's OK:
-        instantiate(register_fields, all_args=_config)
+        for dataset_file_name in dataset_file_names:
+            _config[AtomicDataDict.DATASET_INDEX_KEY] = dataset_idx + dataset_idx_offset
+            dataset_idx_offset += 1
+            _config[f"{prefix}_file_name"] = dataset_file_name
 
-        instance, _ = instantiate(
-            class_name,
-            prefix=prefix,
-            positional_args={"type_mapper": type_mapper},
-            optional_args=_config,
-        )
+            # Register fields:
+            # This might reregister fields, but that's OK:
+            instantiate(register_fields, all_args=_config)
 
-        instances.append(instance)
+            instance, _ = instantiate(
+                class_name,
+                prefix=prefix,
+                positional_args={"type_mapper": type_mapper},
+                optional_args=_config,
+            )
+
+            instances.append(instance)
     
     if config.get("train_on_delta", False):
         return ConcatDataset(instances), data.dataset.ReferenceConcatDataset(instances)
