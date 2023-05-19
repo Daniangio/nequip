@@ -1,6 +1,7 @@
 import os
 from typing import Optional
 import sys
+import copy
 import argparse
 import logging
 import textwrap
@@ -10,7 +11,6 @@ from tqdm.auto import tqdm
 from nequip.data import AtomicDataDict
 
 import ase.io
-
 import torch
 
 from nequip.data import AtomicData, Collater, dataset_from_config, register_fields
@@ -322,7 +322,7 @@ def main(args=None, running_as_script: bool = True):
         and train_idcs is not None
     ):
         if dataset_is_test:
-            test_idcs = torch.arange(dataset.len())
+            test_idcs = torch.arange(len(dataset))
             logger.info(
                 f"Using all frames from original test dataset, yielding a test set size of {len(test_idcs)} frames.",
             )
@@ -349,7 +349,7 @@ def main(args=None, running_as_script: bool = True):
                 )
     elif args.test_indexes is None:
         # Default to all frames
-        test_idcs = torch.arange(len(dataset))[::args.stride]
+        test_idcs = torch.arange(len(dataset))
         logger.info(
             f"Using all frames from the specified test dataset with stride {args.stride}, yielding a test set size of {len(test_idcs)} frames.",
         )
@@ -364,7 +364,7 @@ def main(args=None, running_as_script: bool = True):
         logger.info(
             f"Using provided test set indexes, yielding a test set size of {len(test_idcs)} frames.",
         )
-    test_idcs = torch.as_tensor(test_idcs, dtype=torch.long)
+    test_idcs = torch.as_tensor(test_idcs, dtype=torch.long)[::args.stride]
     test_idcs = test_idcs.tile((args.repeat,))
 
     # Figure out what metrics we're actually computing
@@ -398,6 +398,8 @@ def main(args=None, running_as_script: bool = True):
 
     batch_i: int = 0
     batch_size: int = args.batch_size
+    stop = False
+    already_computed_nodes = None
 
     logger.info("Starting...")
     context_stack = contextlib.ExitStack()
@@ -432,88 +434,109 @@ def main(args=None, running_as_script: bool = True):
             output_target = None
 
         while True:
-            this_batch_test_indexes = test_idcs[
-                batch_i * batch_size : (batch_i + 1) * batch_size
-            ]
-            try:
-                datas = [dataset[int(idex)] for idex in this_batch_test_indexes]
-            except ValueError: # Most probably an atom in pdb that is missing in model
-                batch_i += 1
-                prog.update(len(this_batch_test_indexes))
-                continue
-            if len(datas) == 0:
+            complete_out = None
+            torch.cuda.empty_cache()
+            while True:
+                this_batch_test_indexes = test_idcs[
+                    batch_i * batch_size : (batch_i + 1) * batch_size
+                ]
+                try:
+                    datas = [dataset[int(idex)] for idex in this_batch_test_indexes]
+                except ValueError: # Most probably an atom in pdb that is missing in model
+                    batch_i += 1
+                    prog.update(len(this_batch_test_indexes))
+                    continue
+                if len(datas) == 0:
+                    stop = True
+                    break
+
+                out, batch, already_computed_nodes = evaluate(c, datas, device, model, already_computed_nodes)
+                if complete_out is None:
+                    complete_out = copy.deepcopy(batch)
+                    if AtomicDataDict.PER_ATOM_ENERGY_KEY in out:
+                        complete_out[AtomicDataDict.PER_ATOM_ENERGY_KEY] = torch.zeros(
+                            (len(batch[AtomicDataDict.POSITIONS_KEY]), 1),
+                            dtype=torch.get_default_dtype(),
+                            device=out[AtomicDataDict.PER_ATOM_ENERGY_KEY].device
+                        )
+                    if AtomicDataDict.TOTAL_ENERGY_KEY in out:
+                        complete_out[AtomicDataDict.TOTAL_ENERGY_KEY] = torch.zeros_like(
+                            out[AtomicDataDict.TOTAL_ENERGY_KEY]
+                        )
+                if AtomicDataDict.PER_ATOM_ENERGY_KEY in complete_out:
+                    original_nodes = out[AtomicDataDict.ORIG_EDGE_INDEX_KEY][0].unique()
+                    nodes = out[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+                    complete_out[AtomicDataDict.PER_ATOM_ENERGY_KEY][original_nodes] = out[AtomicDataDict.PER_ATOM_ENERGY_KEY][nodes].detach()
+                
+                if AtomicDataDict.FORCE_KEY in complete_out:
+                    complete_out[AtomicDataDict.FORCE_KEY][original_nodes] = out[AtomicDataDict.FORCE_KEY][nodes].detach()
+
+                if AtomicDataDict.TOTAL_ENERGY_KEY in complete_out:
+                    complete_out[AtomicDataDict.TOTAL_ENERGY_KEY] += out[AtomicDataDict.TOTAL_ENERGY_KEY].detach()
+                del out
+
+                if already_computed_nodes is None:
+                    break
+            if stop:
                 break
-            batch = c.collate(datas)
-            batch = batch.to(device)
-            batch_ = AtomicData.to_AtomicDataDict(batch)
-
-            if AtomicDataDict.PER_ATOM_ENERGY_KEY in batch_:
-                not_nan_edge_filter = torch.isin(batch_[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(~torch.isnan(batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY].flatten())).flatten())
-                batch_[AtomicDataDict.EDGE_INDEX_KEY] = batch_[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-                batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
-                batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY].clone()
-                batch_[AtomicDataDict.BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY][~torch.isnan(batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY]).flatten()]
-
-            out = model(batch_)
 
             with torch.no_grad():
                 # Write output
                 if output_type == "xyz":
                     # add test frame to the output:
-                    out[ORIGINAL_DATASET_INDEX_KEY] = torch.LongTensor(
+                    complete_out[ORIGINAL_DATASET_INDEX_KEY] = torch.LongTensor(
                         this_batch_test_indexes
                     )
-                    batch_[ORIGINAL_DATASET_INDEX_KEY] = torch.LongTensor(
+                    batch[ORIGINAL_DATASET_INDEX_KEY] = torch.LongTensor(
                         this_batch_test_indexes
                     )
                     # append to the file
-                    for dataset_idx in torch.unique(out['dataset_idx']).to('cpu').tolist():
+                    for dataset_idx in torch.unique(complete_out['dataset_idx']).to('cpu').tolist():
                         idx = dataset_idx_to_idx[dataset_idx]
                         ase.io.write(
                             output[idx],
-                            AtomicData.from_AtomicDataDict(out)
+                            AtomicData.from_AtomicDataDict(complete_out)
                             .to(device="cpu")
                             .to_ase(
                                 type_mapper=dataset.datasets[idx].type_mapper,
                                 extra_fields=args.output_fields,
-                                filter_idcs=(out['dataset_idx'] == dataset_idx).to('cpu'),
+                                filter_idcs=(complete_out['dataset_idx'] == dataset_idx).to('cpu'),
                             ),
                             format="extxyz",
                             append=True,
                         )
                         ase.io.write(
                             output_target[idx],
-                            AtomicData.from_AtomicDataDict(batch_)
+                            AtomicData.from_AtomicDataDict(batch)
                             .to(device="cpu")
                             .to_ase(
                                 type_mapper=dataset.datasets[idx].type_mapper,
-                                extra_fields=args.output_fields,
-                                filter_idcs=(out['dataset_idx'] == dataset_idx).to('cpu'),
+                                filter_idcs=(complete_out['dataset_idx'] == dataset_idx).to('cpu'),
                             ),
                             format="extxyz",
                             append=True,
                         )
 
-                # Accumulate metrics
-                if do_metrics:
-                    try:
-                        metrics(out, batch.to_dict())
-                        display_bar.set_description_str(
-                            " | ".join(
-                                f"{k} = {v:4.4f}"
-                                for k, v in metrics.flatten_metrics(
-                                    metrics.current_result(),
-                                    type_names=dataset.datasets[0].type_mapper.type_names,
-                                )[0].items()
-                            )
+            # Accumulate metrics
+            if do_metrics:
+                try:
+                    metrics(complete_out, batch)
+                    display_bar.set_description_str(
+                        " | ".join(
+                            f"{k} = {v:4.4f}"
+                            for k, v in metrics.flatten_metrics(
+                                metrics.current_result(),
+                                type_names=dataset.datasets[0].type_mapper.type_names,
+                            )[0].items()
                         )
-                    except:
-                        display_bar.set_description_str(
-                            "No metrics available for this dataset. Ground truth may be missing."
-                        )
+                    )
+                except:
+                    display_bar.set_description_str(
+                        "No metrics available for this dataset. Ground truth may be missing."
+                    )
 
             batch_i += 1
-            prog.update(batch.num_graphs)
+            prog.update(len(batch['ptr'] - 1))
 
         prog.close()
         if do_metrics:
@@ -531,6 +554,101 @@ def main(args=None, running_as_script: bool = True):
             )
         )
 
+def evaluate(c, datas, device, model, already_computed_nodes=None):
+    batch = c.collate(datas)
+    batch = batch.to(device)
+    batch_ = AtomicData.to_AtomicDataDict(batch)
+
+    # if AtomicDataDict.PER_ATOM_ENERGY_KEY in batch_:
+    #     not_nan_edge_filter = torch.isin(batch_[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(~torch.isnan(batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY].flatten())).flatten())
+    #     batch_[AtomicDataDict.EDGE_INDEX_KEY] = batch_[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
+    #     if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch_:
+    #         batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+    #     batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY].clone()
+    #     batch_[AtomicDataDict.BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY][~torch.isnan(batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY]).flatten()]
+
+    # Limit maximum batch size to avoid CUDA Out of Memory
+    x = batch_[AtomicDataDict.EDGE_INDEX_KEY]
+    y = x.clone()
+    z = batch_.get(AtomicDataDict.PER_ATOM_ENERGY_KEY).clone() if AtomicDataDict.PER_ATOM_ENERGY_KEY in batch_ else None
+    if already_computed_nodes is not None:
+        y = y[:, ~torch.isin(y[0], already_computed_nodes)]
+    node_center_idcs = y[0].unique()
+    max_atoms_correction = 0
+    z_mask = None
+
+    while True:
+        batch_atom_idcs = node_center_idcs[torch.multinomial(
+            node_center_idcs.float(),
+            num_samples=min(len(node_center_idcs), 3000 - max_atoms_correction),
+            replacement=False
+        ).sort().values]
+        batch_size_edge_filter = torch.isin(x[0], batch_atom_idcs)
+        y = x[:, batch_size_edge_filter]
+        if z is not None:
+            z_mask = torch.ones_like(z, dtype=torch.bool)
+            z_mask[y[0].unique()] = False
+            z = batch_.get(AtomicDataDict.PER_ATOM_ENERGY_KEY).clone()
+            z[z_mask] = torch.nan
+        max_atoms_correction += 100
+        if y.shape[1] <= 40000 and (z is None or (~torch.isnan(z)).sum() <= 1800):
+            break
+    x_ulen = len(x[0].unique())
+    del x
+
+    if max_atoms_correction > 0:
+        batch_[AtomicDataDict.EDGE_INDEX_KEY] = y
+        batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_size_edge_filter]
+        batch_[AtomicDataDict.BATCH_KEY] = batch_.get(AtomicDataDict.ORIG_BATCH_KEY, batch_[AtomicDataDict.BATCH_KEY])[y[0].unique()]
+        if z is not None and z_mask is not None:
+            batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY] = z
+
+    # Remove all atoms that do not appear in edges and update edge indices
+    edge_index = batch_[AtomicDataDict.EDGE_INDEX_KEY]
+
+    edge_index_unique = edge_index.unique()
+    batch_[AtomicDataDict.POSITIONS_KEY] = batch_[AtomicDataDict.POSITIONS_KEY][edge_index_unique]
+    if AtomicDataDict.ATOMIC_NUMBERS_KEY in batch_:
+        batch_[AtomicDataDict.ATOMIC_NUMBERS_KEY] = batch_[AtomicDataDict.ATOMIC_NUMBERS_KEY][edge_index_unique]
+    if AtomicDataDict.ATOM_TYPE_KEY in batch_:
+        batch_[AtomicDataDict.ATOM_TYPE_KEY] = batch_[AtomicDataDict.ATOM_TYPE_KEY][edge_index_unique]
+    if AtomicDataDict.PER_ATOM_ENERGY_KEY in batch_:
+        batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY] = batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY][edge_index_unique]
+    if AtomicDataDict.ORIG_BATCH_KEY in batch_:
+        batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.ORIG_BATCH_KEY][edge_index_unique]
+
+    last_idx = -1
+    batch_[AtomicDataDict.ORIG_EDGE_INDEX_KEY] = edge_index.clone()
+    updated_edge_index = edge_index.clone()
+    for idx in edge_index_unique:
+        if idx > last_idx + 1:
+            updated_edge_index[edge_index >= idx] -= idx - last_idx - 1
+        last_idx = idx
+    batch_[AtomicDataDict.EDGE_INDEX_KEY] = updated_edge_index
+
+    node_index_unique = edge_index[0].unique()
+    del edge_index
+    del edge_index_unique
+
+    out = model(batch_)
+    # from e3nn import o3
+    # R = o3.Irreps('1o').D_from_angles(*[torch.tensor(x) for x in [0, 90, 0]]).to(batch_['pos'].device)
+    # batch_['pos'] = torch.einsum("ij,zj->zi", R, batch_['pos'])
+    # out2 = model(batch_)
+    # R2 = o3.Irreps('1o').D_from_angles(*[torch.tensor(x) for x in [0, -90, 0]]).to(batch_['pos'].device)
+    # o1 = out['forces']
+    # o2 = torch.einsum("ij,zj->zi", R2, out2['forces'])
+
+    if already_computed_nodes is None:
+        if len(node_index_unique) < x_ulen:
+            already_computed_nodes = node_index_unique
+    elif len(already_computed_nodes) + len(node_index_unique) == x_ulen:
+        already_computed_nodes = None
+    else:
+        assert len(already_computed_nodes) + len(node_index_unique) < x_ulen
+        already_computed_nodes = torch.cat([already_computed_nodes, node_index_unique], dim=0)
+
+    return out, AtomicData.to_AtomicDataDict(batch), already_computed_nodes
 
 if __name__ == "__main__":
     main(running_as_script=True)

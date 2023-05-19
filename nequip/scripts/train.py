@@ -22,17 +22,7 @@ from nequip.utils._global_options import _set_global_options
 from nequip.scripts._logger import set_up_script_logger
 
 default_config = dict(
-    root="./",
-    run_name="NequIP",
     wandb=False,
-    wandb_project="NequIP",
-    model_builders=[
-        "SimpleIrrepsConfig",
-        "EnergyModel",
-        "PerSpeciesRescale",
-        "ForceOutput",
-        "RescaleEnergyEtc",
-    ],
     dataset_statistics_stride=1,
     default_dtype="float32",
     train_on_delta=False,
@@ -41,6 +31,7 @@ default_config = dict(
     model_debug_mode=False,
     equivariance_test=False,
     grad_anomaly_mode=False,
+    fine_tune=False,
     append=False,
     _jit_bailout_depth=2,  # avoid 20 iters of pain, see https://github.com/pytorch/pytorch/issues/52286
     # Quote from eelison in PyTorch slack:
@@ -62,7 +53,7 @@ def main(args=None, running_as_script: bool = True):
         set_up_script_logger(config.get("log", None), config.verbose)
 
     found_restart_file = isdir(f"{config.root}/{config.run_name}")
-    if found_restart_file and not config.append:
+    if found_restart_file and not (config.append or config.fine_tune):
         raise RuntimeError(
             f"Training instance exists at {config.root}/{config.run_name}; "
             "either set append to True or use a different root or runname"
@@ -71,6 +62,8 @@ def main(args=None, running_as_script: bool = True):
     # for fresh new train
     if not found_restart_file:
         trainer = fresh_start(config)
+    elif config.fine_tune:
+        trainer = fine_tune(config)
     else:
         trainer = restart(config)
 
@@ -107,10 +100,15 @@ def parse_command_line(args=None):
         type=Path,
         default=None,
     )
+    parser.add_argument(
+        "--fine-tune",
+        help="enable the fine-tuning mode. The configuration file should contain the dataset on which to perform fine-tuning",
+        action="store_true",
+    )
     args = parser.parse_args(args=args)
 
     config = Config.from_file(args.config, defaults=default_config)
-    for flag in ("model_debug_mode", "equivariance_test", "grad_anomaly_mode"):
+    for flag in ("model_debug_mode", "equivariance_test", "grad_anomaly_mode", "fine_tune"):
         config[flag] = getattr(args, flag) or config[flag]
     
     loss_coeffs = config.get("loss_coeffs", None)
@@ -213,6 +211,96 @@ def fresh_start(config):
     return trainer
 
 
+def fine_tune(config):
+
+    # load the dictionary
+    restart_file = f"{config.root}/{config.run_name}/trainer.pth"
+    dictionary = load_file(
+        supported_formats=dict(torch=["pt", "pth"]),
+        filename=restart_file,
+        enforced_format="torch",
+    )
+
+    # compare dictionary to config and update stop condition related arguments
+    for k in config.keys():
+        if k == "fine_tuning_run_name":
+            dictionary["run_name"] = config[k]
+            logging.info(f'Update "run_name" to {dictionary["run_name"]}')
+        elif config[k] != dictionary.get(k, ""):
+            if k in [
+                "fine_tune", "dataset_list", "seed", "max_epochs", "loss_coeffs",
+                "wandb", "wandb_project", "log_batch_freq", "verbose", "append",
+                "n_train", "n_val", "batch_size", "validation_batch_size",
+                "max_epochs", "learning_rate", "loss_coeffs", "device",
+                "optimizer_name", "optimizer_params", "metrics_components",
+                "lr_scheduler_name", "lr_scheduler_patience", "lr_scheduler_factor",
+            ]:
+                dictionary[k] = config[k]
+                logging.info(f'Update "{k}" to {dictionary[k]}')
+            elif k.startswith("early_stop"):
+                dictionary[k] = config[k]
+                logging.info(f'Update "{k}" to {dictionary[k]}')
+            elif isinstance(config[k], type(dictionary.get(k, ""))):
+                raise ValueError(
+                    f'Key "{k}" is different in config and the result trainer.pth file. Please double check'
+                )
+    
+    # Remove keys from dictionary that must be recomputed
+    for k in ["train_idcs", "val_idcs"]:
+        dictionary.pop(k)
+
+    check_code_version(dictionary, add_to_config=True)
+
+    config = Config(dictionary, exclude_keys=["state_dict", "progress"])
+
+    _set_global_options(config)
+
+    # = Make the trainer =
+    if config.wandb:
+        import wandb  # noqa: F401
+        # download parameters from wandb in case of sweeping
+        from nequip.utils.wandb import init_n_update
+        config = init_n_update(config)
+
+        if config.train_on_delta:
+            from nequip.train.trainer_delta_wandb import TrainerDeltaWandB
+            trainer = TrainerDeltaWandB.from_dict(dictionary)
+        else:
+            from nequip.train.trainer_wandb import TrainerWandB
+            trainer = TrainerWandB.from_dict(dictionary)
+
+    elif config.train_on_delta:
+        from nequip.train.trainer_delta import TrainerDelta
+
+        trainer = TrainerDelta.from_dict(dictionary)
+    else:
+        from nequip.train.trainer import Trainer
+
+        trainer = Trainer.from_dict(dictionary)
+
+    # = Load the dataset =
+    dataset, ref_dataset = dataset_from_config(config, prefix="dataset")
+    logging.info(f"Successfully loaded the data set of type {dataset}...")
+    try:
+        validation_dataset, validation_ref_dataset = dataset_from_config(config, prefix="validation_dataset")
+        logging.info(
+            f"Successfully loaded the validation data set of type {validation_dataset}..."
+        )
+    except KeyError:
+        # It couldn't be found
+        validation_dataset = None
+        validation_ref_dataset = None
+    
+    if config.train_on_delta:
+        trainer.set_dataset(dataset, ref_dataset, validation_dataset, validation_ref_dataset)
+    else:
+        trainer.set_dataset(dataset, validation_dataset)
+
+    # reset scheduler
+    trainer.lr_sched._reset()
+
+    return trainer
+
 def restart(config):
     # load the dictionary
     restart_file = f"{config.root}/{config.run_name}/trainer.pth"
@@ -232,6 +320,9 @@ def restart(config):
                 dictionary[k] = config[k]
                 logging.info(f'Update "{k}" to {dictionary[k]}')
             elif k == "loss_coeffs":
+                dictionary[k] = config[k]
+                logging.info(f'Update "{k}" to {dictionary[k]}')
+            elif k == "learning_rate":
                 dictionary[k] = config[k]
                 logging.info(f'Update "{k}" to {dictionary[k]}')
             elif isinstance(config[k], type(dictionary.get(k, ""))):

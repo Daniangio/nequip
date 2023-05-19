@@ -1,11 +1,5 @@
 """ Nequip.train.trainer
 
-Todo:
-
-isolate the loss function from the training procedure
-enable wandb resume
-make an interface with ray
-
 """
 
 import sys
@@ -320,6 +314,7 @@ class Trainer:
         self.optimizer_kwargs = deepcopy(optimizer_kwargs)
         self.lr_scheduler_kwargs = deepcopy(lr_scheduler_kwargs)
         self.early_stopping_kwargs = deepcopy(early_stopping_kwargs)
+        self.early_stopping_conds = None
 
         # initialize training states
         self.best_metrics = float("inf")
@@ -504,7 +499,7 @@ class Trainer:
 
         if state_dict:
             dictionary["state_dict"] = {}
-            for key in Trainer.object_keys:
+            for key in self.object_keys:
                 item = getattr(self, key, None)
                 if item is not None:
                     dictionary["state_dict"][key] = item.state_dict()
@@ -623,14 +618,19 @@ class Trainer:
             progress = dictionary["progress"]
 
             # load the model from file
-            iepoch = progress["iepoch"]
-            if isfile(progress["last_model_path"]):
-                load_path = Path(progress["last_model_path"])
-                iepoch = progress["iepoch"]
+            if dictionary.get("fine_tune"):
+                if isfile(progress["best_model_path"]):
+                    load_path = Path(progress["best_model_path"])
+                else:
+                    raise AttributeError("model weights & bias are not saved")
             else:
-                raise AttributeError("model weights & bias are not saved")
+                iepoch = progress["iepoch"]
+                if isfile(progress["last_model_path"]):
+                    load_path = Path(progress["last_model_path"])
+                else:
+                    raise AttributeError("model weights & bias are not saved")
 
-            model, _ = Trainer.load_model_from_training_session(
+            model, _ = cls.load_model_from_training_session(
                 traindir=load_path.parent,
                 model_name=load_path.name,
                 config_dictionary=dictionary,
@@ -645,7 +645,7 @@ class Trainer:
 
         if state_dict is not None and trainer.model is not None:
             logging.debug("Reload optimizer and scheduler states")
-            for key in Trainer.object_keys:
+            for key in cls.object_keys:
                 item = getattr(trainer, key, None)
                 if item is not None:
                     item.load_state_dict(state_dict[key])
@@ -705,7 +705,6 @@ class Trainer:
             model_state_dict = torch.load(
                 traindir + "/" + model_name, map_location=device
             )
-            # model_state_dict.pop('model.func.per_species_rescale.shifts')
             model.load_state_dict(model_state_dict) # strict=False)
 
         return model, config
@@ -823,23 +822,24 @@ class Trainer:
         # Limit maximum batch size to avoid CUDA Out of Memory
         x = data[AtomicDataDict.EDGE_INDEX_KEY]
         y = x.clone()
-        z = data.get(AtomicDataDict.PER_ATOM_ENERGY_KEY, None).clone()
+        z = data.get(AtomicDataDict.PER_ATOM_ENERGY_KEY).clone() if AtomicDataDict.PER_ATOM_ENERGY_KEY in data else None
         node_center_idcs = x[0].unique()
         max_atoms_correction = 0
         z_mask = None
 
         while y.shape[1] > self.batch_max_edges or (z is not None and (~torch.isnan(z)).sum() > self.batch_max_atomic_energies):
-            batch_atom_idcs = torch.multinomial(
+            batch_atom_idcs = node_center_idcs[torch.multinomial(
                 node_center_idcs.float(),
                 num_samples=min(len(node_center_idcs), self.batch_max_atoms - max_atoms_correction),
                 replacement=False
-            ).sort().values
-            batch_size_edge_filter = torch.isin(x[0], x[0][batch_atom_idcs].unique())
+            ).sort().values]
+            batch_size_edge_filter = torch.isin(x[0], batch_atom_idcs)
             y = x[:, batch_size_edge_filter]
-            z_mask = torch.ones_like(z, dtype=torch.bool)
-            z_mask[y[0].unique()] = False
-            z = data.get(AtomicDataDict.PER_ATOM_ENERGY_KEY, None).clone()
-            z[z_mask] = torch.nan
+            if z is not None:
+                z_mask = torch.ones_like(z, dtype=torch.bool)
+                z_mask[y[0].unique()] = False
+                z = data.get(AtomicDataDict.PER_ATOM_ENERGY_KEY).clone()
+                z[z_mask] = torch.nan
             max_atoms_correction += self.max_atoms_correction_step
         del x
 
@@ -855,7 +855,8 @@ class Trainer:
 
         edge_index_unique = edge_index.unique()
         data[AtomicDataDict.POSITIONS_KEY] = data[AtomicDataDict.POSITIONS_KEY][edge_index_unique]
-        data[AtomicDataDict.ATOMIC_NUMBERS_KEY] = data[AtomicDataDict.ATOMIC_NUMBERS_KEY][edge_index_unique]
+        if AtomicDataDict.ATOMIC_NUMBERS_KEY in data:
+            data[AtomicDataDict.ATOMIC_NUMBERS_KEY] = data[AtomicDataDict.ATOMIC_NUMBERS_KEY][edge_index_unique]
         if AtomicDataDict.ATOM_TYPE_KEY in data:
             data[AtomicDataDict.ATOM_TYPE_KEY] = data[AtomicDataDict.ATOM_TYPE_KEY][edge_index_unique]
         if AtomicDataDict.PER_ATOM_ENERGY_KEY in data:
