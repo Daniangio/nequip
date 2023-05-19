@@ -9,6 +9,7 @@ import argparse
 import pathlib
 import logging
 import yaml
+import itertools
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
 # Since numpy gets imported later anyway for dataset stuff, this shouldn't affect performance.
@@ -130,7 +131,7 @@ def load_deployed_model(
 
 def main(args=None):
     parser = argparse.ArgumentParser(
-        description="Create and view information about deployed NequIP potentials."
+        description="Deploy and view information about previously deployed NequIP models."
     )
     # backward compat for 3.6
     if sys.version_info[1] > 6:
@@ -148,9 +149,9 @@ def main(args=None):
         type=pathlib.Path,
     )
     info_parser.add_argument(
-        "--train-dir",
-        help="Path to a working directory from a training session to deploy.",
-        type=pathlib.Path,
+        "--print-config",
+        help="Print the full config of the model.",
+        action="store_true",
     )
 
     build_parser = subparsers.add_parser("build", help="Build a deployment model")
@@ -175,45 +176,25 @@ def main(args=None):
     logging.basicConfig(level=getattr(logging, args.verbose.upper()))
 
     if args.command == "info":
-        config = Config.from_file(str(args.train_dir / "config.yaml"))
-        model, metadata = load_deployed_model(args.model_path, device=config['device'], set_global_options=False)
-        
-        from nequip.data import dataset_from_config
-        dataset, _ = dataset_from_config(config, prefix="dataset")
-        dl_kwargs = dict(
-            exclude_keys=[],
-            num_workers=0,
-            # keep stuff around in memory
-            persistent_workers=(
-                False
-            ),
-            # PyTorch recommends this for GPU since it makes copies much faster
-            pin_memory=(True),
-            # avoid getting stuck
-            timeout=(0),
-            # use the right randomness
+        model, metadata = load_deployed_model(
+            args.model_path, set_global_options=False, freeze=False
         )
-        from nequip.data import DataLoader
-        dl_train = DataLoader(
-            dataset=dataset,
-            shuffle=False,  # training should shuffle
-            batch_size=2,
-            **dl_kwargs,
-        )
-        model.eval()
-        for data in dl_train:
-            data = data.to(config['device'])
-            input_data = AtomicData.to_AtomicDataDict(data)
-            out = model(input_data)
-            print(out['total_energy'])
-            break
-
-        del model
         config = metadata.pop(CONFIG_KEY)
-        metadata_str = "\n".join("  %s: %s" % e for e in metadata.items())
-        logging.info(f"Loaded TorchScript model with metadata:\n{metadata_str}\n")
-        logging.info("Model was built with config:")
-        # print(config)
+        if args.print_config:
+            print(config)
+        else:
+            metadata_str = "\n".join("  %s: %s" % e for e in metadata.items())
+            logging.info(f"Loaded TorchScript model with metadata:\n{metadata_str}\n")
+            logging.info(
+                f"Model has {sum(p.numel() for p in model.parameters())} weights"
+            )
+            logging.info(
+                f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable weights"
+            )
+            logging.info(
+                f"Model weights and buffers take {sum(p.numel() * p.element_size() for p in itertools.chain(model.parameters(), model.buffers())) / (1024 * 1024):.2f} MB"
+            )
+            logging.debug(f"Model had config:\n{config}")
 
     elif args.command == "build":
         if args.model and args.train_dir:
@@ -236,7 +217,7 @@ def main(args=None):
                 args.train_dir, model_name="best_model.pth", device="cpu"
             )
         elif args.model is not None:
-            model = model_from_config(config)
+            model = model_from_config(config, deploy=True)
         else:
             raise AssertionError
 

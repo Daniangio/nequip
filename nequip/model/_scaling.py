@@ -13,7 +13,10 @@ RESCALE_THRESHOLD = 1e-6
 
 
 def RescaleEnergyEtc(
-    model: GraphModuleMixin, config, dataset: ConcatDataset, initialize: bool
+    model: GraphModuleMixin,
+    config,
+    initialize: bool,
+    dataset: ConcatDataset,
 ):
     return GlobalRescale(
         model=model,
@@ -35,7 +38,6 @@ def RescaleEnergyEtc(
 def GlobalRescale(
     model: GraphModuleMixin,
     config,
-    dataset: ConcatDataset,
     initialize: bool,
     module_prefix: str,
     default_scale: Union[str, float, list],
@@ -44,6 +46,7 @@ def GlobalRescale(
     default_shift_keys: list,
     default_related_scale_keys: list,
     default_related_shift_keys: list,
+    dataset: ConcatDataset,
 ):
     """Add global rescaling for energy(-based quantities).
 
@@ -76,11 +79,12 @@ def GlobalRescale(
                 raise ValueError(f"Invalid global scale `{value}`")
 
         # = Compute shifts and scales =
-        computed_stats = _compute_stats(
-            str_names=str_names,
-            dataset=dataset,
-            stride=config.dataset_statistics_stride,
-        )
+        if len(str_names) > 0:
+            computed_stats = _compute_stats(
+                str_names=str_names,
+                dataset=dataset,
+                stride=config.dataset_statistics_stride,
+            )
 
         if isinstance(global_scale, str):
             s = global_scale
@@ -130,8 +134,8 @@ def GlobalRescale(
 def PerSpeciesRescale(
     model: GraphModuleMixin,
     config,
-    dataset: ConcatDataset,
     initialize: bool,
+    dataset: ConcatDataset,
 ):
     """Add global rescaling for energy(-based quantities).
 
@@ -200,12 +204,13 @@ def PerSpeciesRescale(
                 ], "Requested to set either the shifts or scales of the per_species_rescale using dataset values, but chose to provide the other in non-dataset units. Please give the explictly specified shifts/scales in dataset units and set per_species_rescale_arguments_in_dataset_units"
 
         # = Compute shifts and scales =
-        computed_stats = _compute_stats(
-            str_names=str_names,
-            dataset=dataset,
-            stride=config.dataset_statistics_stride,
-            kwargs=config.get(module_prefix + "_kwargs", {}),
-        )
+        if len(str_names) > 0:
+            computed_stats = _compute_stats(
+                str_names=str_names,
+                dataset=dataset,
+                stride=config.dataset_statistics_stride,
+                kwargs=config.get(module_prefix + "_kwargs", {}),
+            )
 
         if isinstance(scales, str):
             s = scales
