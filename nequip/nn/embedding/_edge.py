@@ -76,7 +76,7 @@ class RadialBasisEdgeEncoding(GraphModuleMixin, torch.nn.Module):
         self.out_field = out_field
         self._init_irreps(
             irreps_in=irreps_in,
-            irreps_out={self.out_field: o3.Irreps([(self.basis.num_basis + 1, (0, 1))])},
+            irreps_out={self.out_field: o3.Irreps([(self.basis.num_basis, (0, 1))])},
         )
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
@@ -85,5 +85,39 @@ class RadialBasisEdgeEncoding(GraphModuleMixin, torch.nn.Module):
         edge_length_embedded = (
             self.basis(edge_length) * self.cutoff(edge_length)[:, None]
         )
-        data[self.out_field] = torch.cat([edge_length_embedded, edge_length.reshape(-1, 1)], dim=1)
+        data[self.out_field] = edge_length_embedded
+        return data
+
+
+@compile_mode("script")
+class RadialBasisSquaredEdgeEncoding(GraphModuleMixin, torch.nn.Module):
+    out_field: str
+
+    def __init__(
+        self,
+        basis=BesselBasis,
+        cutoff=PolynomialCutoff,
+        basis_kwargs={},
+        cutoff_kwargs={},
+        out_field: str = AtomicDataDict.EDGE_EMBEDDING_KEY,
+        irreps_in=None,
+    ):
+        super().__init__()
+        self.basis = basis(**basis_kwargs)
+        self.cutoff = cutoff(**cutoff_kwargs)
+        self.out_field = out_field
+        self._init_irreps(
+            irreps_in=irreps_in,
+            irreps_out={self.out_field: o3.Irreps([(self.basis.num_basis * 2, (0, 1))])},
+        )
+
+    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+        data = AtomicDataDict.with_edge_vectors(data, with_lengths=True)
+        edge_length = data[AtomicDataDict.EDGE_LENGTH_KEY]
+        # edge_length_sq = torch.pow(edge_length, 2)
+        edge_length_embedded = (
+            self.basis(edge_length) * self.cutoff(edge_length)[:, None]
+        )
+        # data[self.out_field] = torch.cat([edge_length_embedded, edge_length_sq.reshape(-1, 1), edge_length_sq.reshape(-1, 1).reciprocal()], dim=1)
+        data[self.out_field] = torch.cat([edge_length_embedded, torch.pow(edge_length_embedded, 2)], dim=1)
         return data

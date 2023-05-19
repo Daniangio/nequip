@@ -200,7 +200,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                     f"the include_frames is changed. "
                     f"please delete the processed folder and rerun {self.processed_paths[0]}"
                 )
-            self.fixed_fields['dataset_idx'] = self.fixed_fields['dataset_idx'] * 0 + self.dataset_idx
+            self.fixed_fields['dataset_idx'] = self.fixed_fields.get('dataset_idx', 0) * 0 + self.dataset_idx
 
     def len(self):
         if self.data is None:
