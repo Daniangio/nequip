@@ -7,6 +7,8 @@ from torch_runstats.scatter import scatter, scatter_mean
 from nequip.data import AtomicDataDict
 from nequip.utils import instantiate_from_cls_name
 
+from e3nn.o3 import Irreps
+
 class SimpleLoss:
     """wrapper to compute weighted loss function
 
@@ -25,6 +27,10 @@ class SimpleLoss:
 
     def __init__(self, func_name: str, params: dict = {}):
         self.ignore_nan = params.get("ignore_nan", False)
+        self.ignore_zeroes = params.get("ignore_zeroes", False)
+        self.normalize_irreps = params.get("normalize_irreps", None)
+        if self.normalize_irreps is not None:
+            self.normalize_irreps = Irreps(self.normalize_irreps)
         func, _ = instantiate_from_cls_name(
             torch.nn,
             class_name=func_name,
@@ -45,18 +51,62 @@ class SimpleLoss:
     ):
         # zero the nan entries
         ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device))
+        pred_key = torch.nan_to_num(pred[key], nan=0.0)
+        if self.normalize_irreps is not None:
+            cum_pos = 0
+            with torch.no_grad():
+                for irrep in self.normalize_irreps:
+                    dim = irrep.ir.dim
+                    tensor = pred_key[..., cum_pos:cum_pos + dim]
+                    norm = tensor.norm(dim=-1, keepdim=True)
+                    norm[norm == 0.] += 1.
+                    ref_key[..., cum_pos:cum_pos + dim] *= norm
+                    cum_pos += dim
         has_nan = self.ignore_nan and torch.isnan(ref_key.sum())
+        not_zeroes = torch.ones_like(ref_key).mean(dim=-1).int() if not self.ignore_zeroes else (~torch.all(ref_key == 0., dim=-1)).int()
         if has_nan:
-            not_nan = (ref[key] == ref[key]).int()
-            loss = self.func(torch.nan_to_num(pred[key], nan=0.0), torch.nan_to_num(ref_key, nan=0.0)) * not_nan
+            not_nan = (ref[key] == ref[key]).int() * not_zeroes[..., None]
+            loss = self.func(pred_key, torch.nan_to_num(ref_key, nan=0.0)) * not_nan
             if mean:
                 return loss.sum() / not_nan.sum()
             else:
                 return loss
         else:
-            loss = self.func(pred[key], ref_key)
+            loss = self.func(pred[key], ref_key) * not_zeroes[..., None]
             if mean:
-                return loss.mean()
+                return loss.mean(dim=-1).sum() / not_zeroes.sum()
+            else:
+                return loss
+
+
+class DihedralLoss(SimpleLoss):
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+    ):
+        # zero the nan entries
+        ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device))
+        pred_key = torch.nan_to_num(pred[key], nan=0.0)
+        has_nan = self.ignore_nan and torch.isnan(ref_key.sum())
+        ref_key = torch.nan_to_num(ref_key, nan=0.0)
+        not_zeroes = torch.ones_like(ref_key).mean(dim=-1).int() if not self.ignore_zeroes else (~torch.all(ref_key == 0., dim=-1)).int()
+        if has_nan:
+            not_nan = (ref[key] == ref[key]).int() * not_zeroes[..., None]
+            # loss = (self.func(torch.cos(pred_key), torch.cos(ref_key)) + self.func(torch.sin(pred_key), torch.sin(ref_key))) * not_nan
+            loss = (2 + torch.cos(pred_key - ref_key - torch.pi) + torch.sin(pred_key - ref_key - torch.pi/2)) * not_nan
+            if mean:
+                return loss.sum() / not_nan.sum()
+            else:
+                return loss
+        else:
+            # loss = (self.func(torch.cos(pred_key), torch.cos(ref_key)) + self.func(torch.sin(pred_key), torch.sin(ref_key))) * not_zeroes[..., None]
+            loss = (2 + torch.cos(pred_key - ref_key - torch.pi) + torch.sin(pred_key - ref_key - torch.pi/2)) * not_zeroes[..., None]
+            if mean:
+                return loss.mean(dim=-1).sum() / not_zeroes.sum()
             else:
                 return loss
 
@@ -208,6 +258,7 @@ def find_loss_function(name: str, params):
         perspecies=PerSpeciesLoss,
         peratom=PerAtomLoss,
         batchaverage=BatchAverageLoss,
+        dih=DihedralLoss,
     )
 
     if isinstance(name, str):
