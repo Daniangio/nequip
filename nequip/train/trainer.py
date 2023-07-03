@@ -243,10 +243,9 @@ class Trainer:
         train_idcs: Optional[Union[list, list[list]]] = None,
         val_idcs: Optional[Union[list, list[list]]] = None,
         train_val_split: str = "random",
-        batch_max_atoms: int = 3000,
         batch_max_edges: int = 100000,
-        batch_max_atomic_energies: int = 2000,
-        max_atoms_correction_step: int = 50,
+        batch_max_atoms: int = 3000,
+        max_atoms_correction_step: int = 20,
         init_callbacks: list = [],
         end_of_epoch_callbacks: list = [],
         end_of_batch_callbacks: list = [],
@@ -807,146 +806,179 @@ class Trainer:
         else:
             self.model.train()
 
-        # Do any target rescaling
-        data = data.to(self.torch_device)
-        data = AtomicData.to_AtomicDataDict(data)
+        already_computed_nodes = None
 
-        # Remove edges of atoms whose result is NaN
-        for key in self.loss.coeffs:
-            if self.loss.funcs[key].ignore_nan:
-                if key == AtomicDataDict.PER_ATOM_ENERGY_KEY:
-                    not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(~torch.isnan(data[key].flatten())).flatten())
-                    data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-                    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
-                        data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
-                    data[AtomicDataDict.ORIG_BATCH_KEY] = data[AtomicDataDict.BATCH_KEY].clone()
-                    data[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][~torch.isnan(data[key]).flatten()]
-        
-        # Limit maximum batch size to avoid CUDA Out of Memory
-        x = data[AtomicDataDict.EDGE_INDEX_KEY]
-        y = x.clone()
-        z = data.get(AtomicDataDict.PER_ATOM_ENERGY_KEY).clone() if AtomicDataDict.PER_ATOM_ENERGY_KEY in data else None
-        node_center_idcs = x[0].unique()
-        max_atoms_correction = 0
-        z_mask = None
+        while True:
+            batch_ = data.clone()
+            batch_ = batch_.to(self.torch_device)
+            batch_ = AtomicData.to_AtomicDataDict(batch_)
 
-        while y.shape[1] > self.batch_max_edges or (z is not None and (~torch.isnan(z)).sum() > self.batch_max_atomic_energies):
-            batch_atom_idcs = node_center_idcs[torch.multinomial(
-                node_center_idcs.float(),
-                num_samples=min(len(node_center_idcs), self.batch_max_atoms - max_atoms_correction),
-                replacement=False
-            ).sort().values]
-            batch_size_edge_filter = torch.isin(x[0], batch_atom_idcs)
-            y = x[:, batch_size_edge_filter]
-            if z is not None:
-                z_mask = torch.ones_like(z, dtype=torch.bool)
-                z_mask[y[0].unique()] = False
-                z = data.get(AtomicDataDict.PER_ATOM_ENERGY_KEY).clone()
-                z[z_mask] = torch.nan
-            max_atoms_correction += self.max_atoms_correction_step
-        del x
+            # Remove edges of atoms whose result is NaN
+            for key in self.loss.coeffs:
+                if self.loss.funcs[key].ignore_nan:
+                    if key == AtomicDataDict.PER_ATOM_ENERGY_KEY:
+                        val = batch_[key].reshape(len(batch_[key]), -1)
+                        not_nan_edge_filter = torch.isin(batch_[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
+                        batch_[AtomicDataDict.EDGE_INDEX_KEY] = batch_[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
+                        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch_:
+                            batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+                        batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY].clone()
+            
+            # Limit maximum batch size to avoid CUDA Out of Memory
+            x = batch_[AtomicDataDict.EDGE_INDEX_KEY]
+            y = x.clone()
+            z = batch_.get(AtomicDataDict.PER_ATOM_ENERGY_KEY).clone() if AtomicDataDict.PER_ATOM_ENERGY_KEY in batch_ else None
+            if already_computed_nodes is not None:
+                y = y[:, ~torch.isin(y[0], already_computed_nodes)]
+            node_center_idcs = y[0].unique()
+            max_atoms_correction = 0
+            z_mask = None
 
-        if max_atoms_correction > 0:
-            data[AtomicDataDict.EDGE_INDEX_KEY] = y
-            data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_size_edge_filter]
-            data[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.ORIG_BATCH_KEY][y[0].unique()]
-            if z is not None and z_mask is not None:
-                data[AtomicDataDict.PER_ATOM_ENERGY_KEY] = z
-        
-        # Remove all atoms that do not appear in edges and update edge indices
-        edge_index = data[AtomicDataDict.EDGE_INDEX_KEY]
+            while True:
+                batch_atom_idcs = node_center_idcs[torch.multinomial(
+                    node_center_idcs.float(),
+                    num_samples=min(len(node_center_idcs), self.batch_max_atoms - max_atoms_correction),
+                    replacement=False
+                ).sort().values]
+                batch_size_edge_filter = torch.isin(x[0], batch_atom_idcs)
+                y = x[:, batch_size_edge_filter]
+                if z is not None:
+                    z_mask = torch.ones_like(z, dtype=torch.bool)
+                    z_mask[y[0].unique()] = False
+                    z = batch_.get(AtomicDataDict.PER_ATOM_ENERGY_KEY).clone()
+                    z[z_mask] = torch.nan
+                    z_is_not_nan = (~torch.isnan(z))
+                    for _ in range(z_is_not_nan.dim() - 1):
+                        z_is_not_nan = torch.all(z_is_not_nan==True, dim=-1)
+                max_atoms_correction += self.max_atoms_correction_step
+                if y.shape[1] <= self.batch_max_edges and len(y.unique()) <= self.batch_max_atoms:
+                    break
+            x_ulen = len(x[0].unique())
+            del x
 
-        edge_index_unique = edge_index.unique()
-        data[AtomicDataDict.POSITIONS_KEY] = data[AtomicDataDict.POSITIONS_KEY][edge_index_unique]
-        if AtomicDataDict.ATOMIC_NUMBERS_KEY in data:
-            data[AtomicDataDict.ATOMIC_NUMBERS_KEY] = data[AtomicDataDict.ATOMIC_NUMBERS_KEY][edge_index_unique]
-        if AtomicDataDict.ATOM_TYPE_KEY in data:
-            data[AtomicDataDict.ATOM_TYPE_KEY] = data[AtomicDataDict.ATOM_TYPE_KEY][edge_index_unique]
-        if AtomicDataDict.PER_ATOM_ENERGY_KEY in data:
-            data[AtomicDataDict.PER_ATOM_ENERGY_KEY] = data[AtomicDataDict.PER_ATOM_ENERGY_KEY][edge_index_unique]
+            if max_atoms_correction > 0:
+                batch_[AtomicDataDict.EDGE_INDEX_KEY] = y
+                batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_size_edge_filter]
+                batch_[AtomicDataDict.BATCH_KEY] = batch_.get(AtomicDataDict.ORIG_BATCH_KEY, batch_[AtomicDataDict.BATCH_KEY])[y.unique()]
+                if z is not None and z_mask is not None:
+                    batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY] = z
+            
+            batch_["ptr"] = torch.nn.functional.pad(torch.bincount(batch_.get(AtomicDataDict.BATCH_KEY)).flip(dims=[0]), (0, 1), mode='constant').flip(dims=[0])
+            
+            # Remove all atoms that do not appear in edges and update edge indices
+            edge_index = batch_[AtomicDataDict.EDGE_INDEX_KEY]
 
-        last_idx = -1
-        updated_edge_index = edge_index.clone()
-        for idx in edge_index_unique:
-            if idx > last_idx + 1:
-                updated_edge_index[edge_index >= idx] -= idx - last_idx - 1
-            last_idx = idx
-        data[AtomicDataDict.EDGE_INDEX_KEY] = updated_edge_index
-        del edge_index
-        del edge_index_unique
+            edge_index_unique = edge_index.unique()
+            batch_[AtomicDataDict.POSITIONS_KEY] = batch_[AtomicDataDict.POSITIONS_KEY][edge_index_unique]
+            if AtomicDataDict.ATOMIC_NUMBERS_KEY in batch_:
+                batch_[AtomicDataDict.ATOMIC_NUMBERS_KEY] = batch_[AtomicDataDict.ATOMIC_NUMBERS_KEY][edge_index_unique]
+            if AtomicDataDict.ATOM_TYPE_KEY in batch_:
+                batch_[AtomicDataDict.ATOM_TYPE_KEY] = batch_[AtomicDataDict.ATOM_TYPE_KEY][edge_index_unique]
+            if AtomicDataDict.PER_ATOM_ENERGY_KEY in batch_:
+                # indices = torch.ones_like(edge_index_unique, dtype=bool)
+                # for elem in edge_index[0].unique():
+                #     indices = indices & (edge_index_unique != elem)
+                # not_center_atoms_idcs = edge_index_unique[indices]
+                # batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY][not_center_atoms_idcs] = torch.nan
+                batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY] = batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY][edge_index_unique]
 
-        # Rescale data
-        data_unscaled = data
-        for layer in self.rescale_layers:
-            # This means that self.model is RescaleOutputs
-            # this will normalize the targets
-            # in validation (eval mode), it does nothing
-            # in train mode, if normalizes the targets
-            data_unscaled = layer.unscale(data_unscaled)
+            last_idx = -1
+            updated_edge_index = edge_index.clone()
+            for idx in edge_index_unique:
+                if idx > last_idx + 1:
+                    updated_edge_index[edge_index >= idx] -= idx - last_idx - 1
+                last_idx = idx
+            batch_[AtomicDataDict.EDGE_INDEX_KEY] = updated_edge_index
 
-        # Run model
-        # We make a shallow copy of the input dict in case the model modifies it
-        input_data = {
-            k: v
-            for k, v in data_unscaled.items()
-            if k not in self._remove_from_model_input
-        }
-        out = self.model(input_data)
-        del input_data
+            node_index_unique = edge_index[0].unique()
+            del edge_index
+            del edge_index_unique
 
-        # If we're in evaluation mode (i.e. validation), then
-        # data_unscaled's target prop is unnormalized, and out's has been rescaled to be in the same units
-        # If we're in training, data_unscaled's target prop has been normalized, and out's hasn't been touched, so they're both in normalized units
-        # Note that either way all normalization was handled internally by RescaleOutput
+            # Rescale batch_
+            data_unscaled = batch_
+            for layer in self.rescale_layers:
+                # This means that self.model is RescaleOutputs
+                # this will normalize the targets
+                # in validation (eval mode), it does nothing
+                # in train mode, if normalizes the targets
+                data_unscaled = layer.unscale(data_unscaled)
 
-        if not validation:
-            # Actually do an optimization step, since we're training:
-            loss, loss_contrib = self.loss(pred=out, ref=data_unscaled)
-            # see https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#use-parameter-grad-none-instead-of-model-zero-grad-or-optimizer-zero-grad
-            self.optim.zero_grad(set_to_none=True)
-            loss.backward()
+            # Run model
+            # We make a shallow copy of the input dict in case the model modifies it
+            input_data = {
+                k: v
+                for k, v in data_unscaled.items()
+                if k not in self._remove_from_model_input
+            }
+            out = self.model(input_data)
+            del input_data
 
-            # for p in self.model.parameters():
-            #     while p.grad.abs().max() < 1e-7:
-            #         p.grad = p.grad * 1e1
-
-            # See https://stackoverflow.com/a/56069467
-            # Has to happen after .backward() so there are grads to clip
-            if self.max_gradient_norm < float("inf"):
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.max_gradient_norm
-                )
-
-            self.optim.step()
-
-            if self.use_ema:
-                self.ema.update()
-
-            if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
-                self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
-
-        with torch.no_grad():
-            if validation:
-                scaled_out = out
-                _data_unscaled = data
-                for layer in self.rescale_layers:
-                    # loss function always needs to be in normalized unit
-                    scaled_out = layer.unscale(scaled_out, force_process=True)
-                    _data_unscaled = layer.unscale(_data_unscaled, force_process=True)
-                loss, loss_contrib = self.loss(pred=scaled_out, ref=_data_unscaled)
+            if already_computed_nodes is None:
+                if len(node_index_unique) < x_ulen:
+                    already_computed_nodes = node_index_unique
+            elif len(already_computed_nodes) + len(node_index_unique) == x_ulen:
+                already_computed_nodes = None
             else:
-                # If we are in training mode, we need to bring the prediction
-                # into real units
-                for layer in self.rescale_layers[::-1]:
-                    out = layer.scale(out, force_process=True)
+                assert len(already_computed_nodes) + len(node_index_unique) < x_ulen
+                already_computed_nodes = torch.cat([already_computed_nodes, node_index_unique], dim=0)
 
-            # save metrics stats
-            self.batch_losses = self.loss_stat(loss, loss_contrib)
-            # in validation mode, data is in real units and the network scales
-            # out to be in real units interally.
-            # in training mode, data is still in real units, and we rescaled
-            # out to be in real units above.
-            self.batch_metrics = self.metrics(pred=out, ref=data)
+            # If we're in evaluation mode (i.e. validation), then
+            # data_unscaled's target prop is unnormalized, and out's has been rescaled to be in the same units
+            # If we're in training, data_unscaled's target prop has been normalized, and out's hasn't been touched, so they're both in normalized units
+            # Note that either way all normalization was handled internally by RescaleOutput
+
+            if not validation:
+                # Actually do an optimization step, since we're training:
+                loss, loss_contrib = self.loss(pred=out, ref=data_unscaled)
+                # see https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#use-parameter-grad-none-instead-of-model-zero-grad-or-optimizer-zero-grad
+                self.optim.zero_grad(set_to_none=True)
+                loss.backward()
+
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        p.grad = torch.nan_to_num(p.grad, nan=0.)
+
+                # See https://stackoverflow.com/a/56069467
+                # Has to happen after .backward() so there are grads to clip
+                if self.max_gradient_norm < float("inf"):
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.max_gradient_norm
+                    )
+
+                self.optim.step()
+
+                if self.use_ema:
+                    self.ema.update()
+
+                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
+                    self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+
+            with torch.no_grad():
+                if validation:
+                    scaled_out = out
+                    _data_unscaled = batch_
+                    for layer in self.rescale_layers:
+                        # loss function always needs to be in normalized unit
+                        scaled_out = layer.unscale(scaled_out, force_process=True)
+                        _data_unscaled = layer.unscale(_data_unscaled, force_process=True)
+                    loss, loss_contrib = self.loss(pred=scaled_out, ref=_data_unscaled)
+                else:
+                    # If we are in training mode, we need to bring the prediction
+                    # into real units
+                    for layer in self.rescale_layers[::-1]:
+                        out = layer.scale(out, force_process=True)
+
+                # save metrics stats
+                self.batch_losses = self.loss_stat(loss, loss_contrib)
+                # in validation mode, batch_ is in real units and the network scales
+                # out to be in real units interally.
+                # in training mode, batch_ is still in real units, and we rescaled
+                # out to be in real units above.
+                self.batch_metrics = self.metrics(pred=out, ref=batch_)
+            
+            del batch_
+            if already_computed_nodes is None:
+                break
 
     @property
     def stop_cond(self):

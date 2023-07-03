@@ -8,7 +8,7 @@ from torch.utils.data import ConcatDataset
 from nequip import data
 from nequip.data.transforms import TypeMapper
 from nequip.data import AtomicDataDict, register_fields
-from nequip.utils import instantiate, get_w_prefix
+from nequip.utils import instantiate, get_w_prefix, Config
 
 
 def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
@@ -74,7 +74,7 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         else:
             dataset_file_names = [f_name]
         
-        _config: dict = config.as_dict()
+        _config: dict = config.as_dict() if isinstance(config, Config) else config
         _config.update(_config_dataset)
 
         # if dataset r_max is not found, use the universal r_max

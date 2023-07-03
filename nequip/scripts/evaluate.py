@@ -450,12 +450,12 @@ def main(args=None, running_as_script: bool = True):
                     stop = True
                     break
 
-                out, batch, already_computed_nodes = evaluate(c, datas, device, model, already_computed_nodes)
+                out, batch, already_computed_nodes = evaluate(c, datas, device, model, already_computed_nodes, model_config)
                 if complete_out is None:
                     complete_out = copy.deepcopy(batch)
                     if AtomicDataDict.PER_ATOM_ENERGY_KEY in out:
                         complete_out[AtomicDataDict.PER_ATOM_ENERGY_KEY] = torch.zeros(
-                            (len(batch[AtomicDataDict.POSITIONS_KEY]), 1),
+                            (len(batch[AtomicDataDict.POSITIONS_KEY]), *out[AtomicDataDict.PER_ATOM_ENERGY_KEY].shape[1:]),
                             dtype=torch.get_default_dtype(),
                             device=out[AtomicDataDict.PER_ATOM_ENERGY_KEY].device
                         )
@@ -554,10 +554,11 @@ def main(args=None, running_as_script: bool = True):
             )
         )
 
-def evaluate(c, datas, device, model, already_computed_nodes=None):
+def evaluate(c, datas, device, model, already_computed_nodes, model_config):
     batch = c.collate(datas)
     batch = batch.to(device)
     batch_ = AtomicData.to_AtomicDataDict(batch)
+    batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY].clone()
 
     # if AtomicDataDict.PER_ATOM_ENERGY_KEY in batch_:
     #     not_nan_edge_filter = torch.isin(batch_[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(~torch.isnan(batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY].flatten())).flatten())
@@ -580,7 +581,7 @@ def evaluate(c, datas, device, model, already_computed_nodes=None):
     while True:
         batch_atom_idcs = node_center_idcs[torch.multinomial(
             node_center_idcs.float(),
-            num_samples=min(len(node_center_idcs), 3000 - max_atoms_correction),
+            num_samples=min(len(node_center_idcs), model_config.get("batch_max_atoms", 3000) - max_atoms_correction),
             replacement=False
         ).sort().values]
         batch_size_edge_filter = torch.isin(x[0], batch_atom_idcs)
@@ -590,8 +591,11 @@ def evaluate(c, datas, device, model, already_computed_nodes=None):
             z_mask[y[0].unique()] = False
             z = batch_.get(AtomicDataDict.PER_ATOM_ENERGY_KEY).clone()
             z[z_mask] = torch.nan
-        max_atoms_correction += 100
-        if y.shape[1] <= 40000 and (z is None or (~torch.isnan(z)).sum() <= 1800):
+            z_is_not_nan = (~torch.isnan(z))
+            for _ in range(z_is_not_nan.dim() - 1):
+                z_is_not_nan = torch.all(z_is_not_nan==True, dim=-1)
+        max_atoms_correction += model_config.get("max_atoms_correction_step", 20)
+        if y.shape[1] <= model_config.get("batch_max_edges", 100000) and len(y.unique()) <= model_config.get("batch_max_atoms", 2000):
             break
     x_ulen = len(x[0].unique())
     del x
@@ -599,7 +603,7 @@ def evaluate(c, datas, device, model, already_computed_nodes=None):
     if max_atoms_correction > 0:
         batch_[AtomicDataDict.EDGE_INDEX_KEY] = y
         batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_size_edge_filter]
-        batch_[AtomicDataDict.BATCH_KEY] = batch_.get(AtomicDataDict.ORIG_BATCH_KEY, batch_[AtomicDataDict.BATCH_KEY])[y[0].unique()]
+        batch_[AtomicDataDict.BATCH_KEY] = batch_.get(AtomicDataDict.ORIG_BATCH_KEY, batch_[AtomicDataDict.BATCH_KEY])[y.unique()]
         if z is not None and z_mask is not None:
             batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY] = z
 
@@ -614,8 +618,8 @@ def evaluate(c, datas, device, model, already_computed_nodes=None):
         batch_[AtomicDataDict.ATOM_TYPE_KEY] = batch_[AtomicDataDict.ATOM_TYPE_KEY][edge_index_unique]
     if AtomicDataDict.PER_ATOM_ENERGY_KEY in batch_:
         batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY] = batch_[AtomicDataDict.PER_ATOM_ENERGY_KEY][edge_index_unique]
-    if AtomicDataDict.ORIG_BATCH_KEY in batch_:
-        batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.ORIG_BATCH_KEY][edge_index_unique]
+    # if AtomicDataDict.ORIG_BATCH_KEY in batch_:
+    #     batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.ORIG_BATCH_KEY][edge_index_unique]
 
     last_idx = -1
     batch_[AtomicDataDict.ORIG_EDGE_INDEX_KEY] = edge_index.clone()
