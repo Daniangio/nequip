@@ -111,6 +111,64 @@ class DihedralLoss(SimpleLoss):
                 return loss
 
 
+class SideChainLoss(SimpleLoss):
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+    ):
+        # zero the nan entries
+        ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device))
+        pred_key = torch.nan_to_num(pred[key], nan=0.0)
+        ref_key = torch.nan_to_num(ref_key, nan=0.0)
+        not_zeroes = torch.ones_like(ref_key).mean(dim=-1).int() if not self.ignore_zeroes else (~torch.all(ref_key == 0., dim=-1)).int()
+        
+        loss_rmsd = self.func(pred_key, ref_key)
+        loss_bond = 10 * torch.max(
+            torch.zeros_like(pred_key[..., 0]),
+            torch.abs(torch.norm(pred_key, dim=-1) - torch.norm(ref_key, dim=-1)) - (0.15)
+        )
+
+        lvl_idcs_mask = ref['lvl_idcs_mask']
+        rel_vec_dist_vec_list_pred, rel_vec_dist_vec_list_ref = [], []
+        for idcs_mask in lvl_idcs_mask[1:]:
+            for i, mask in enumerate(idcs_mask):
+                for comb in torch.combinations(torch.nonzero(mask).flatten(), r=2):
+                    pred_comb = pred_key[i, comb]
+                    ref_comb = ref_key[i, comb]
+                    pred_dist_vec = torch.zeros((1, 3, 3), dtype=pred_comb.dtype, device=pred_comb.device)
+                    ref_dist_vec = torch.zeros((1, 3, 3), dtype=ref_comb.dtype, device=ref_comb.device)
+                    pred_dist_vec[:, 0::2] = pred_comb
+                    ref_dist_vec[:, 0::2] = ref_comb
+                    rel_vec_dist_vec_list_pred.append(pred_dist_vec)
+                    rel_vec_dist_vec_list_ref.append(ref_dist_vec)
+        rel_vec_dist_vec_pred = torch.stack(rel_vec_dist_vec_list_pred, dim=1)
+        rel_vec_dist_vec_ref = torch.stack(rel_vec_dist_vec_list_ref, dim=1)
+        
+        angle_pred = get_angles(rel_vec_dist_vec_pred)[0]
+        angle_ref = get_angles(rel_vec_dist_vec_ref)[0]
+        angle_not_zeroes = ~torch.isnan(angle_ref)
+        angle_pred = angle_pred[angle_not_zeroes]
+        angle_ref = angle_ref[angle_not_zeroes]
+        loss_angle = 10 * torch.max(
+            torch.zeros_like(angle_pred),
+            2 - (0.1) + \
+            torch.cos(angle_pred - angle_ref - torch.pi) + \
+            torch.sin(angle_pred - angle_ref - torch.pi/2)
+        )
+
+        if mean:
+            # return loss_bond.sum() / not_zeroes.sum() + loss_angle.mean()
+            # return loss_angle.mean()
+            # return (loss_rmsd.mean(dim=-1).sum() + loss_bond.sum()) / not_zeroes.sum()
+            return (loss_rmsd.mean(dim=-1).sum() + loss_bond.sum()) / not_zeroes.sum() + loss_angle.mean()
+        else:
+            return loss_rmsd
+
+
 class BatchAverageLoss(SimpleLoss):
     def __call__(
         self,
@@ -259,6 +317,7 @@ def find_loss_function(name: str, params):
         peratom=PerAtomLoss,
         batchaverage=BatchAverageLoss,
         dih=DihedralLoss,
+        sc=SideChainLoss,
     )
 
     if isinstance(name, str):
@@ -273,3 +332,24 @@ def find_loss_function(name: str, params):
         return name
     else:
         raise NotImplementedError(f"{name} Loss is not implemented")
+
+
+def get_angles_from_vectors(b0: torch.Tensor, b1: torch.Tensor, return_cos: bool = False) -> torch.Tensor:
+    b0n = torch.norm(b0, dim=2, keepdim=False)
+    b1n = torch.norm(b1, dim=2, keepdim=False)
+    angles = torch.sum(b0 * b1, axis=-1) / b0n / b1n
+    clamped_cos = torch.clamp(angles, min=-1., max=1.)
+    if return_cos:
+        return clamped_cos
+    return torch.arccos(clamped_cos)
+
+def get_angles(dist_vectors: torch.Tensor) -> torch.Tensor:
+    """ Compute angle values (in radiants) over specified angle_idcs for every frame in the batch
+
+        :param dist_vectors: torch.Tensor | shape (batch, n_angles, 3, xyz)
+        :return:             torch.Tensor | shape (batch, n_angles)
+    """
+
+    b0 = -1.0 * (dist_vectors[:, :, 1] - dist_vectors[:, :, 0])
+    b1 = (dist_vectors[:, :, 2] - dist_vectors[:, :, 1])
+    return get_angles_from_vectors(b0, b1)
