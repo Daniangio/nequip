@@ -15,11 +15,13 @@ class TypeMapper:
     num_types: int
     chemical_symbol_to_type: Optional[Dict[str, int]]
     type_names: List[str]
+    keep_type_names: List[str]
     _min_Z: int
 
     def __init__(
         self,
         type_names: Optional[List[str]] = None,
+        keep_type_names: Optional[List[str]] = None,
         chemical_symbol_to_type: Optional[Dict[str, int]] = None,
         chemical_symbols: Optional[List[str]] = None,
         using_bead_numbers: bool = False,
@@ -99,6 +101,8 @@ class TypeMapper:
         self.num_types = len(type_names)
         # Check type_names
         self.type_names = type_names
+        self.keep_type_names = keep_type_names
+        self.keep_bead_types = [type_names.index(ktn) for ktn in self.keep_type_names] if self.keep_type_names is not None else None
 
     def __call__(
         self, data: Union[AtomicDataDict.Type, AtomicData], types_required: bool = True
@@ -110,10 +114,10 @@ class TypeMapper:
                     data[AtomicDataDict.ATOM_TYPE_KEY],
                     device=data[AtomicDataDict.ATOM_TYPE_KEY].device
                 )
-                logging.info(
-                    "Data contained BEAD_NUMBERS_KEY but did not contain ATOMIC_NUMBERS_KEY; " +
-                    "Defaulting to beads of unspecified/mixed chemical species with atomic number 0."
-                )
+                # logging.warn(
+                #     "Data contained BEAD_NUMBERS_KEY but did not contain ATOMIC_NUMBERS_KEY; " +
+                #     "Defaulting to beads of unspecified/mixed chemical species with atomic number 0."
+                # )
         if AtomicDataDict.ATOM_TYPE_KEY in data:
             if AtomicDataDict.BEAD_NUMBERS_KEY in data:
                 del data[AtomicDataDict.BEAD_NUMBERS_KEY]

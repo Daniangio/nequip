@@ -309,7 +309,7 @@ class AtomicData(Data):
         if pbc is None:
             if cell is not None:
                 raise ValueError(
-                    "A cell was provided, but pbc weren't. Please explicitly probide PBC."
+                    "A cell was provided, but pbc weren't. Please explicitly provide PBC."
                 )
             # there are no PBC if cell and pbc are not provided
             pbc = False
@@ -323,7 +323,6 @@ class AtomicData(Data):
 
         edge_index = kwargs.get(AtomicDataDict.EDGE_INDEX_KEY, None)
         edge_cell_shift = kwargs.get(AtomicDataDict.EDGE_CELL_SHIFT_KEY, None)
-        cell = kwargs.get(AtomicDataDict.CELL_KEY, None)
         if edge_index is None:
             edge_index, edge_cell_shift, cell = neighbor_list_and_relative_vec(
                 pos=pos,

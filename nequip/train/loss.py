@@ -1,3 +1,4 @@
+import re
 import logging
 from typing import Union, List
 
@@ -49,48 +50,19 @@ class Loss:
         self.delta_keys = []
 
         if isinstance(coeffs, str):
-            self.coeffs[coeffs] = 1.0
-            self.funcs[coeffs] = find_loss_function("MSELoss", {})
+            self.register_coeffs(key=coeffs, coeff=1.0, func="MSELoss", func_params={})
         elif isinstance(coeffs, list):
-            for key in coeffs:
-                self.coeffs[key] = 1.0
-                self.funcs[key] = find_loss_function("MSELoss", {})
-        elif isinstance(coeffs, dict):
-            for key, value in coeffs.items():
-                logging.debug(f" parsing {key} {value}")
-                coeff = 1.0
-                func = "MSELoss"
-                func_params = {}
-                if isinstance(value, (float, int)):
-                    coeff = value
-                elif isinstance(value, str) or callable(value):
-                    func = value
-                elif isinstance(value, (list, tuple)):
-                    # list of [func], [func, param], [coeff, func], [coeff, func, params]
-                    if isinstance(value[0], (float, int)):
-                        coeff = value[0]
-                        if len(value) > 1:
-                            func = value[1]
-                        if len(value) > 2:
-                            assert isinstance(value[2], dict)
-                            train_on_delta = value[2].get("TrainOnDelta", False)
-                            if train_on_delta:
-                                self.delta_keys += [key]
-                            func_params = value[2]
-                    else:
-                        func = value[0]
-                        if len(value) > 1:
-                            func_params = value[1]
+            for elem in coeffs:
+                if isinstance(elem, str):
+                    self.register_coeffs(key=elem, coeff=1.0, func="MSELoss", func_params={})
+                elif isinstance(elem, dict):
+                    self.parse_dict(elem)
                 else:
                     raise NotImplementedError(
-                        f"expected float, list or tuple, but get {type(value)}"
+                        f"loss_coeffs can only a list of str or dict. got {type(coeffs)}"
                     )
-                logging.debug(f" parsing {coeff} {func}")
-                self.coeffs[key] = coeff
-                self.funcs[key] = find_loss_function(
-                    func,
-                    func_params,
-                )
+        elif isinstance(coeffs, dict):
+            self.parse_dict(coeffs)
         else:
             raise NotImplementedError(
                 f"loss_coeffs can only be str, list and dict. got {type(coeffs)}"
@@ -104,17 +76,71 @@ class Loss:
 
         loss = 0.0
         contrib = {}
-        for key in self.coeffs:
+        for key in self.keys:
             _loss = self.funcs[key](
                 pred=pred,
                 ref=ref,
-                key=key,
+                key= self.remove_suffix(key),
                 mean=True,
             )
             contrib[key] = _loss
             loss = loss + self.coeffs[key] * _loss
 
         return loss, contrib
+    
+    def parse_dict(self, coeffs: dict):
+        for key, value in coeffs.items():
+            logging.debug(f" parsing {key} {value}")
+            coeff = 1.0
+            func = "MSELoss"
+            func_params = {}
+            if isinstance(value, (float, int)):
+                coeff = value
+            elif isinstance(value, str) or callable(value):
+                func = value
+            elif isinstance(value, (list, tuple)):
+                # list of [func], [func, param], [coeff, func], [coeff, func, params]
+                if isinstance(value[0], (float, int)):
+                    coeff = value[0]
+                    if len(value) > 1:
+                        func = value[1]
+                    if len(value) > 2:
+                        assert isinstance(value[2], dict)
+                        train_on_delta = value[2].get("TrainOnDelta", False)
+                        if train_on_delta:
+                            self.delta_keys += [key]
+                        func_params = value[2]
+                else:
+                    func = value[0]
+                    if len(value) > 1:
+                        func_params = value[1]
+            else:
+                raise NotImplementedError(
+                    f"expected float, list or tuple, but get {type(value)}"
+                )
+            logging.debug(f" parsing {coeff} {func}")
+            self.register_coeffs(key=key, coeff=coeff, func=func, func_params=func_params)
+    
+    def register_coeffs(self, key: str, coeff: float, func: str, func_params: dict = {}):
+        key = self.suffix_key(key)
+        self.coeffs[key] = coeff
+        self.funcs[key] = find_loss_function(func, func_params)
+    
+    def suffix_key(self, key):
+        suffix_id = 0
+        key = self.add_suffix(key, suffix_id)
+        while key in self.coeffs.keys():
+            key = self.remove_suffix(key)
+            key = self.add_suffix(key, suffix_id)
+            suffix_id += 1
+        return key
+    
+    def remove_suffix(self, key):
+        return re.sub('_suffix_\d+', '', key)
+
+    def add_suffix(self, key: str, suffix_id: int):
+        return f"{key}_suffix_{str(suffix_id)}"
+
 
 
 class LossStat:

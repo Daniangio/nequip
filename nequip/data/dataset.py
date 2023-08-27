@@ -788,21 +788,19 @@ class NpzDataset(AtomicInMemoryDataset):
 
         mapped = {self.key_mapping.get(k, k): data[k] for k in keys}
 
-        # TODO: generalize this?
-        for intkey in (
-            AtomicDataDict.ATOMIC_NUMBERS_KEY,
-            AtomicDataDict.ATOM_TYPE_KEY,
-            AtomicDataDict.EDGE_INDEX_KEY,
-        ):
-            if intkey in mapped:
-                mapped[intkey] = mapped[intkey].astype(np.int64)
-
         fields = {k: fix_batch_dim(v) for k, v in mapped.items() if k not in self.npz_fixed_field_keys}
         # note that we don't deal with extra_fixed_fields here; AtomicInMemoryDataset does that.
         fixed_fields = {
             k: v for k, v in mapped.items() if k in self.npz_fixed_field_keys
         }
         fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = np.array(self.dataset_idx)
+
+        for key in mapped.keys():
+            if key in fields and np.issubdtype(fields[key].dtype, np.integer):
+                fields[key] = fields[key].astype(np.int64)
+            if key in fixed_fields and np.issubdtype(fixed_fields[key].dtype, np.integer):
+                fixed_fields[key] = fixed_fields[key].astype(np.int64)
+
         return fields, fixed_fields
 
 def fix_batch_dim(arr):
