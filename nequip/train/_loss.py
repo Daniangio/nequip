@@ -121,58 +121,53 @@ class InvariantsLoss(SimpleLoss):
         key: str,
         mean: bool = True,
     ):
-        pred_key = torch.nan_to_num(pred[key], nan=0.0)
-        ref_key = torch.nan_to_num(ref.get(key, torch.zeros_like(pred[key], device=pred[key].device)), nan=0.0)
-        idcs_mask = ref["bead2atom_idcs"]
-        idcs_mask_slices = ref["bead2atom_idcs_slices"]
+        pred_key = pred[key]
+        ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device))
+        idcs_mask = pred["bead2atom_idcs"]
+        idcs_mask_slices = pred["bead2atom_idcs_slices"]
+        atom_pos_slices = pred['atom_pos_slices']
+        orig_center_atoms = pred[AtomicDataDict.ORIG_EDGE_INDEX_KEY][0].unique()
 
-        atom_pos_slices = [0]
-        num_atoms = 0
-        for idcs_mask_from, idcs_mask_to in zip(idcs_mask_slices[:-1], idcs_mask_slices[1:]):
-            num_atoms += idcs_mask[idcs_mask_from:idcs_mask_to].max().item() + 1
-            atom_pos_slices.append(num_atoms)
-        atom_pos_slices = torch.tensor(atom_pos_slices, dtype=int, device=pred_key.device)
-
-        atom_bond_idcs = ref["atom_bond_idcs"]
-        atom_bond_idcs_slices = ref["atom_bond_idcs_slices"]
+        atom_bond_idcs = ref["atom_bond_idx"]
+        atom_bond_idcs_slices = ref["atom_bond_idx_slices"]
 
         bond_pred_list, bond_ref_list = [], []
-        for (atom_bond_idcs_from, atom_bond_idcs_to, atom_pos_from, atom_pos_to) in zip(
-            atom_bond_idcs_slices[:-1],
-            atom_bond_idcs_slices[1:],
+        for (b2a_idcs_from, b2a_idcs_to), (atom_bond_idx_from, atom_bond_idx_to), atom_pos_from in zip(
+            zip(idcs_mask_slices[:-1], idcs_mask_slices[1:]),
+            zip(atom_bond_idcs_slices[:-1], atom_bond_idcs_slices[1:]),
             atom_pos_slices[:-1],
-            atom_pos_slices[1:]
         ):
-            bond_pred = get_bonds(pred_key[atom_pos_from:atom_pos_to], atom_bond_idcs[atom_bond_idcs_from:atom_bond_idcs_to])
-            bond_ref = get_bonds(ref_key[atom_pos_from:atom_pos_to], atom_bond_idcs[atom_bond_idcs_from:atom_bond_idcs_to])
-            bond_not_zeroes = (~torch.isnan(bond_pred)) * (~torch.isnan(bond_ref))
-            bond_pred = bond_pred[bond_not_zeroes]
-            bond_ref = bond_ref[bond_not_zeroes]
+            batch_orig_center_atoms = orig_center_atoms[(orig_center_atoms>=b2a_idcs_from) & (orig_center_atoms<b2a_idcs_to)]
+            batch_recon_atom_idcs = idcs_mask[batch_orig_center_atoms].unique()[1:] + atom_pos_from
+            batch_atom_bond_idcs = atom_bond_idcs[atom_bond_idx_from:atom_bond_idx_to] + atom_pos_from
+            pred_atom_bond_idcs = batch_atom_bond_idcs[torch.all(torch.isin(batch_atom_bond_idcs, batch_recon_atom_idcs), dim=1)]
+            bond_pred = get_bonds(pred_key, pred_atom_bond_idcs)
+            bond_ref = get_bonds(ref_key, pred_atom_bond_idcs)
             bond_pred_list.append(bond_pred)
             bond_ref_list.append(bond_ref)
-        bond_pred = torch.cat(bond_pred_list, dim=0)
-        bond_ref = torch.cat(bond_ref_list, dim=0)
+        bond_pred = torch.cat(bond_pred_list, axis=0)
+        bond_ref = torch.cat(bond_ref_list, axis=0)
         loss_bonds = torch.max(torch.zeros_like(bond_pred), torch.pow(bond_pred - bond_ref, 2) - 0.0025)
         
-        atom_angle_idcs = ref["atom_angle_idcs"]
-        atom_angle_idcs_slices = ref["atom_angle_idcs_slices"]
+        atom_angle_idcs = ref["atom_angle_idx"]
+        atom_angle_idcs_slices = ref["atom_angle_idx_slices"]
 
         angle_pred_list, angle_ref_list = [], []
-        for (atom_angle_idcs_from, atom_angle_idcs_to, atom_pos_from, atom_pos_to) in zip(
-            atom_angle_idcs_slices[:-1],
-            atom_angle_idcs_slices[1:],
+        for (b2a_idcs_from, b2a_idcs_to), (atom_angle_idx_from, atom_angle_idx_to), atom_pos_from in zip(
+            zip(idcs_mask_slices[:-1], idcs_mask_slices[1:]),
+            zip(atom_angle_idcs_slices[:-1], atom_angle_idcs_slices[1:]),
             atom_pos_slices[:-1],
-            atom_pos_slices[1:]
         ):
-            angle_pred = get_angles(pred_key[atom_pos_from:atom_pos_to], atom_angle_idcs[atom_angle_idcs_from:atom_angle_idcs_to])
-            angle_ref = get_angles(ref_key[atom_pos_from:atom_pos_to], atom_angle_idcs[atom_angle_idcs_from:atom_angle_idcs_to])
-            angle_not_zeroes = (~torch.isnan(angle_pred)) * (~torch.isnan(angle_ref))
-            angle_pred = angle_pred[angle_not_zeroes]
-            angle_ref = angle_ref[angle_not_zeroes]
+            batch_orig_center_atoms = orig_center_atoms[(orig_center_atoms>=b2a_idcs_from) & (orig_center_atoms<b2a_idcs_to)]
+            batch_recon_atom_idcs = idcs_mask[batch_orig_center_atoms].unique()[1:] + atom_pos_from
+            batch_atom_angle_idcs = atom_angle_idcs[atom_angle_idx_from:atom_angle_idx_to] + atom_pos_from
+            pred_atom_angle_idcs = batch_atom_angle_idcs[torch.all(torch.isin(batch_atom_angle_idcs, batch_recon_atom_idcs), dim=1)]
+            angle_pred = get_angles(pred_key, pred_atom_angle_idcs)
+            angle_ref = get_angles(ref_key, pred_atom_angle_idcs)
             angle_pred_list.append(angle_pred)
             angle_ref_list.append(angle_ref)
-        angle_pred = torch.cat(angle_pred_list, dim=0)
-        angle_ref = torch.cat(angle_ref_list, dim=0)
+        angle_pred = torch.cat(angle_pred_list, axis=0)
+        angle_ref = torch.cat(angle_ref_list, axis=0)
         
         loss_angles = torch.max(
             torch.zeros_like(angle_pred),
@@ -182,7 +177,7 @@ class InvariantsLoss(SimpleLoss):
         )
 
         if mean:
-            return loss_bonds.mean() + loss_angles.mean()
+            return torch.nan_to_num(loss_bonds.mean()) + torch.nan_to_num(loss_angles.mean(), nan=0.)
         else:
             return loss_angles
 
@@ -207,7 +202,7 @@ class SideChainLoss(SimpleLoss):
             torch.abs(torch.norm(pred_key, dim=-1) - torch.norm(ref_key, dim=-1)) - (0.05)
         ) * not_zeroes
 
-        lvl_idcs_mask = ref['lvl_idcs_mask']
+        lvl_idcs_mask = ref['lvl_mask_index']
         rel_vec_dist_vec_list_pred, rel_vec_dist_vec_list_ref = [], []
         for idcs_mask in lvl_idcs_mask[1:]:
             for i, mask in enumerate(idcs_mask):
