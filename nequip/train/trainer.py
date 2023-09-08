@@ -833,6 +833,8 @@ class Trainer:
                         batch_[AtomicDataDict.EDGE_INDEX_KEY] = batch_[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
                         if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch_:
                             batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+                        batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY].clone()
+                        batch_[AtomicDataDict.BATCH_KEY] = batch_[AtomicDataDict.ORIG_BATCH_KEY][batch_[AtomicDataDict.EDGE_INDEX_KEY].unique()]
                         per_node_features_keys.append(key_clean)
             
             # Limit maximum batch size to avoid CUDA Out of Memory
@@ -858,7 +860,7 @@ class Trainer:
                 
                 def get_y_edge_filter(y: torch.Tensor, correction: int):
                     target_atom_idcs, count = torch.unique(y[1], return_counts=True)
-                    less_connected_atom_idcs = torch.topk(-count, self.max_atoms_correction_step - correction).indices
+                    less_connected_atom_idcs = torch.topk(-count, max(1, self.max_atoms_correction_step - correction)).indices
                     target_atom_idcs_to_remove = target_atom_idcs[less_connected_atom_idcs]
                     node_center_idcs_to_remove = torch.unique(y[0][torch.isin(y[1], target_atom_idcs_to_remove)])
                     return ~torch.isin(y[0], node_center_idcs_to_remove), correction
@@ -866,6 +868,11 @@ class Trainer:
                 y_edge_filter, correction = get_y_edge_filter(y, correction=correction)
                 while y_edge_filter.sum() == 0:
                     correction += 1
+                    if correction >= self.max_atoms_correction_step:
+                        print(
+                            f"Dataset with index {batch_['dataset_idx'].item()} has at least one center atom with connections"
+                             " that exceed 'batch_max_edges' or 'batch_max_atoms'")
+                        return
                     y_edge_filter, correction = get_y_edge_filter(y, correction=correction)
                 y = y[:, y_edge_filter]
                 
@@ -925,6 +932,7 @@ class Trainer:
                         raise Exception('Dimension not implemented')
 
             last_idx = -1
+            batch_[AtomicDataDict.ORIG_EDGE_INDEX_KEY] = edge_index
             updated_edge_index = edge_index.clone()
             for idx in edge_index_unique:
                 if idx > last_idx + 1:
