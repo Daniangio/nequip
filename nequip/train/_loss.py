@@ -31,6 +31,7 @@ class SimpleLoss:
         self.ignore_pred_nan = params.get("ignore_pred_nan", False)
         self.ignore_zeroes = params.get("ignore_zeroes", False)
         self.normalize_irreps = params.get("normalize_irreps", None)
+        self.filter_levels = params.get("filter_levels", None)
         if self.normalize_irreps is not None:
             self.normalize_irreps = Irreps(self.normalize_irreps)
         func, _ = instantiate_from_cls_name(
@@ -64,16 +65,25 @@ class SimpleLoss:
                     ref_key[..., cum_pos:cum_pos + dim] *= norm
                     cum_pos += dim
         has_nan = (self.ignore_nan and torch.isnan(ref_key.sum())) or (self.ignore_pred_nan and torch.isnan(pred_key.sum()))
-        not_zeroes = torch.ones_like(ref_key).mean(dim=-1).int() if not self.ignore_zeroes else (~torch.all(ref_key == 0., dim=-1)).int()
+        not_zeroes = torch.ones(*ref_key.shape[:max(1, len(ref_key.shape)-1)], device=ref_key.device).int() if not self.ignore_zeroes else (
+            ~torch.all(ref_key == 0., dim=-1).int() if len(ref_key.shape) > 1 else (ref_key != 0)
+        )
+        if self.filter_levels is not None:
+            levels_filter_mask = pred["lvl_idcs_mask"][:self.filter_levels+1].sum(dim=0).bool()
+            levels_filter = pred['bead2atom_reconstructed_idcs'][levels_filter_mask]
+        else:
+            levels_filter = torch.ones_like(not_zeroes, dtype=torch.bool)
+        not_zeroes = not_zeroes[levels_filter]
         if has_nan:
-            not_nan = (ref[key] == ref[key]).int() * (pred[key] == pred[key]).int()
-            loss = self.func(torch.nan_to_num(pred_key, nan=0.), torch.nan_to_num(ref_key, nan=0.)) * not_nan * not_zeroes[..., None]
+            not_nan = (ref[key] == ref[key]).int()[levels_filter] * (pred[key] == pred[key]).int()[levels_filter]
+            loss = self.func(torch.nan_to_num(pred_key, nan=0.)[levels_filter], torch.nan_to_num(ref_key, nan=0.)[levels_filter]) * not_nan * not_zeroes.reshape(*([-1] + [1] * (len(pred_key.shape)-1)))
             if mean:
                 return loss.sum() / not_nan.sum()
             else:
+                loss[~not_nan.bool()] = torch.nan
                 return loss
         else:
-            loss = self.func(pred_key, ref_key) * not_zeroes[..., None]
+            loss = self.func(pred_key[levels_filter], ref_key[levels_filter]) * not_zeroes[..., None]
             if mean:
                 return loss.mean(dim=-1).sum() / not_zeroes.sum()
             else:
@@ -123,10 +133,10 @@ class InvariantsLoss(SimpleLoss):
     ):
         pred_key = pred[key]
         ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device))
-        idcs_mask = pred["bead2atom_idcs"]
-        idcs_mask_slices = pred["bead2atom_idcs_slices"]
+        idcs_mask = pred["bead2atom_reconstructed_idcs"]
+        idcs_mask_slices = pred["bead2atom_reconstructed_idcs_slices"]
         atom_pos_slices = pred['atom_pos_slices']
-        orig_center_atoms = pred[AtomicDataDict.ORIG_EDGE_INDEX_KEY][0].unique()
+        center_atoms = pred[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
 
         atom_bond_idcs = ref["atom_bond_idx"]
         atom_bond_idcs_slices = ref["atom_bond_idx_slices"]
@@ -137,8 +147,8 @@ class InvariantsLoss(SimpleLoss):
             zip(atom_bond_idcs_slices[:-1], atom_bond_idcs_slices[1:]),
             atom_pos_slices[:-1],
         ):
-            batch_orig_center_atoms = orig_center_atoms[(orig_center_atoms>=b2a_idcs_from) & (orig_center_atoms<b2a_idcs_to)]
-            batch_recon_atom_idcs = idcs_mask[batch_orig_center_atoms].unique()[1:] + atom_pos_from
+            batch_center_atoms = center_atoms[(center_atoms>=b2a_idcs_from) & (center_atoms<b2a_idcs_to)]
+            batch_recon_atom_idcs = idcs_mask[batch_center_atoms].unique()[1:] + atom_pos_from
             batch_atom_bond_idcs = atom_bond_idcs[atom_bond_idx_from:atom_bond_idx_to] + atom_pos_from
             pred_atom_bond_idcs = batch_atom_bond_idcs[torch.all(torch.isin(batch_atom_bond_idcs, batch_recon_atom_idcs), dim=1)]
             bond_pred = get_bonds(pred_key, pred_atom_bond_idcs)
@@ -147,7 +157,7 @@ class InvariantsLoss(SimpleLoss):
             bond_ref_list.append(bond_ref)
         bond_pred = torch.cat(bond_pred_list, axis=0)
         bond_ref = torch.cat(bond_ref_list, axis=0)
-        loss_bonds = torch.max(torch.zeros_like(bond_pred), torch.pow(bond_pred - bond_ref, 2) - 0.0025)
+        loss_bonds = torch.max(torch.zeros_like(bond_pred), torch.pow(bond_pred - bond_ref, 2) - 0.0009) # accept up to 0.03 Angstrom error
         
         atom_angle_idcs = ref["atom_angle_idx"]
         atom_angle_idcs_slices = ref["atom_angle_idx_slices"]
@@ -158,8 +168,8 @@ class InvariantsLoss(SimpleLoss):
             zip(atom_angle_idcs_slices[:-1], atom_angle_idcs_slices[1:]),
             atom_pos_slices[:-1],
         ):
-            batch_orig_center_atoms = orig_center_atoms[(orig_center_atoms>=b2a_idcs_from) & (orig_center_atoms<b2a_idcs_to)]
-            batch_recon_atom_idcs = idcs_mask[batch_orig_center_atoms].unique()[1:] + atom_pos_from
+            batch_center_atoms = center_atoms[(center_atoms>=b2a_idcs_from) & (center_atoms<b2a_idcs_to)]
+            batch_recon_atom_idcs = idcs_mask[batch_center_atoms].unique()[1:] + atom_pos_from
             batch_atom_angle_idcs = atom_angle_idcs[atom_angle_idx_from:atom_angle_idx_to] + atom_pos_from
             pred_atom_angle_idcs = batch_atom_angle_idcs[torch.all(torch.isin(batch_atom_angle_idcs, batch_recon_atom_idcs), dim=1)]
             angle_pred = get_angles(pred_key, pred_atom_angle_idcs)
