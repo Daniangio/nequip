@@ -2,6 +2,7 @@
 
 """
 
+import copy
 import sys
 import inspect
 import logging
@@ -642,7 +643,7 @@ class Trainer:
 
         trainer = cls(model=model, **dictionary)
 
-        if state_dict is not None and trainer.model is not None:
+        if state_dict is not None and trainer.model is not None and not dictionary.get("fine_tune"):
             logging.debug("Reload optimizer and scheduler states")
             for key in cls.object_keys:
                 item = getattr(trainer, key, None)
@@ -704,7 +705,7 @@ class Trainer:
             model_state_dict = torch.load(
                 traindir + "/" + model_name, map_location=device
             )
-            model.load_state_dict(model_state_dict) # strict=False)
+            model.load_state_dict(model_state_dict)
 
         return model, config
 
@@ -809,42 +810,48 @@ class Trainer:
         already_computed_nodes = None
         chunk = already_computed_nodes is not None
 
+        batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device))
+        batch[AtomicDataDict.ORIG_BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY].clone()
+
+        keep_bead_types = self.dataset_train.datasets[0].type_mapper.keep_bead_types
+
+        # Remove edges of atoms whose result is NaN
+        per_node_features_keys = []
+        for key in self.loss.coeffs:
+            if self.loss.funcs[key].ignore_nan:
+                key_clean = self.loss.remove_suffix(key)
+                batch[key_clean] = batch[key_clean].squeeze()
+                if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
+                    val = batch[key_clean].reshape(len(batch[key_clean]), -1)
+                    if keep_bead_types is not None:
+                        # Remove edges of atoms that do not appear in keep_bead_types
+                        keep_bead_types = torch.tensor(keep_bead_types, device=self.torch_device)
+                        batch[key_clean][~torch.isin(batch[AtomicDataDict.ATOM_TYPE_KEY].flatten(), keep_bead_types)] = torch.nan
+
+                    not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
+                    batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
+                    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch:
+                        batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+                    batch[AtomicDataDict.ORIG_BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY].clone()
+                    batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.ORIG_BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
+                    per_node_features_keys.append(key_clean)
+        
+        x = batch[AtomicDataDict.EDGE_INDEX_KEY]
+        x_ulen = len(x[0].unique())
+
+        z = None
+        if per_node_features_keys is not None:
+            z = []
+            for per_node_features_key in per_node_features_keys:
+                z.append(batch.get(per_node_features_key).clone() if per_node_features_key in batch else None)
+
         while True:
-            batch_ = data.clone()
-            batch_ = batch_.to(self.torch_device)
-            batch_ = AtomicData.to_AtomicDataDict(batch_)
-            batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY].clone()
 
-            keep_bead_types = self.dataset_train.datasets[0].type_mapper.keep_bead_types
+            batch_ = copy.deepcopy(batch)
 
-            # Remove edges of atoms whose result is NaN
-            per_node_features_keys = []
-            for key in self.loss.coeffs:
-                if self.loss.funcs[key].ignore_nan:
-                    key_clean = self.loss.remove_suffix(key)
-                    if key_clean in batch_ and len(batch_[key_clean]) == len(batch_[AtomicDataDict.BATCH_KEY]):
-                        val = batch_[key_clean].reshape(len(batch_[key_clean]), -1)
-                        if keep_bead_types is not None:
-                            # Remove edges of atoms that do not appear in keep_bead_types
-                            keep_bead_types = torch.tensor(keep_bead_types, device=self.torch_device)
-                            batch_[key_clean][~torch.isin(batch_[AtomicDataDict.ATOM_TYPE_KEY], keep_bead_types)] = torch.nan
-
-                        not_nan_edge_filter = torch.isin(batch_[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
-                        batch_[AtomicDataDict.EDGE_INDEX_KEY] = batch_[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-                        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch_:
-                            batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
-                        batch_[AtomicDataDict.ORIG_BATCH_KEY] = batch_[AtomicDataDict.BATCH_KEY].clone()
-                        batch_[AtomicDataDict.BATCH_KEY] = batch_[AtomicDataDict.ORIG_BATCH_KEY][batch_[AtomicDataDict.EDGE_INDEX_KEY].unique()]
-                        per_node_features_keys.append(key_clean)
-            
             # Limit maximum batch size to avoid CUDA Out of Memory
-            x = batch_[AtomicDataDict.EDGE_INDEX_KEY]
             y = x.clone()
-            z = None
-            if per_node_features_keys is not None:
-                z = []
-                for per_node_features_key in per_node_features_keys:
-                    z.append(batch_.get(per_node_features_key).clone() if per_node_features_key in batch_ else None)
+            
             if already_computed_nodes is not None:
                 y = y[:, ~torch.isin(y[0], already_computed_nodes)]
             node_center_idcs = y[0].unique()
@@ -852,53 +859,44 @@ class Trainer:
             if len(node_center_idcs) == 0:
                 return
 
-            while y.shape[1] > self.batch_max_edges or len(y.unique()) > self.batch_max_atoms:
+            offset = 0
+            while len(y.unique()) > self.batch_max_atoms: # or y.shape[1] > self.batch_max_edges
                 chunk = True
-                ### Pick the target edges LESS connected and remove all the node_center_idcs connected to those.
-                ### In this way, you prune the "less shared" nodes and keep only nodes that are "clustered",
-                ### thus maximizing the number of node_center_idcs while complaining to the self.batch_max_atoms restrain
+                offset += 1
                 
-                def get_y_edge_filter(y: torch.Tensor, correction: int):
-                    target_atom_idcs, count = torch.unique(y[1], return_counts=True)
-                    less_connected_atom_idcs = torch.topk(-count, max(1, self.max_atoms_correction_step - correction)).indices
-                    target_atom_idcs_to_remove = target_atom_idcs[less_connected_atom_idcs]
-                    node_center_idcs_to_remove = torch.unique(y[0][torch.isin(y[1], target_atom_idcs_to_remove)])
-                    return ~torch.isin(y[0], node_center_idcs_to_remove), correction
-                correction = 0
-                y_edge_filter, correction = get_y_edge_filter(y, correction=correction)
-                while y_edge_filter.sum() == 0:
-                    correction += 1
-                    if correction >= self.max_atoms_correction_step:
-                        print(
-                            f"Dataset with index {batch_['dataset_idx'].item()} has at least one center atom with connections"
-                             " that exceed 'batch_max_edges' or 'batch_max_atoms'")
-                        return
-                    y_edge_filter, correction = get_y_edge_filter(y, correction=correction)
+                def get_node_center_idcs(y: torch.Tensor, batch_max_atoms: int, offset: int = 1):
+                    unique_set = set()
+                    
+                    for i, num in enumerate(y[1]):
+                        unique_set.add(num.item())
+
+                        if len(unique_set) >= batch_max_atoms:
+                            return torch.unique(y[0, :i+1])[:-offset]
+                    return torch.unique(y[0])
+
+                def get_y_edge_filter(y: torch.Tensor, offset: int = 1):
+                    node_center_idcs = get_node_center_idcs(y, self.batch_max_atoms, offset)
+                    edge_filter = torch.isin(y[0], node_center_idcs)
+                    return edge_filter
+                
+                y_edge_filter = get_y_edge_filter(y, offset)
                 y = y[:, y_edge_filter]
                 
                 #########################################################################################################
-
-                if z is not None:
-                    z = []
-                    for per_node_features_key in per_node_features_keys:
-                        z.append(batch_.get(per_node_features_key).clone() if per_node_features_key in batch_ else None)
-                    for z_elem in z:
-                        if z_elem is not None:
-                            z_mask = torch.ones_like(z_elem, dtype=torch.bool)
-                            z_mask[y[0].unique()] = False
-                            z_elem[z_mask] = torch.nan
-            x_ulen = len(x[0].unique())
 
             if chunk:
                 batch_[AtomicDataDict.EDGE_INDEX_KEY] = y
                 x_edge_filter = torch.isin(x[0], y[0].unique())
                 batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch_[AtomicDataDict.EDGE_CELL_SHIFT_KEY][x_edge_filter]
                 batch_[AtomicDataDict.BATCH_KEY] = batch_.get(AtomicDataDict.ORIG_BATCH_KEY, batch_[AtomicDataDict.BATCH_KEY])[y.unique()]
-                if z is not None and z_mask is not None:
+                if z is not None:
                     for per_node_features_key, z_elem in zip(per_node_features_keys, z):
                         if z_elem is not None:
-                            batch_[per_node_features_key] = z_elem
-            del x
+                            new_z_elem = z_elem.clone()
+                            z_mask = torch.ones_like(new_z_elem, dtype=torch.bool)
+                            z_mask[y[0].unique()] = False
+                            new_z_elem[z_mask] = torch.nan
+                            batch_[per_node_features_key] = new_z_elem
             
             for slices_key, slices in data.__slices__.items():
                 batch_[f"{slices_key}_slices"] = torch.tensor(slices, dtype=int)
@@ -910,8 +908,8 @@ class Trainer:
             edge_index_unique = edge_index.unique()
             
             # TODO Add ignore_chunk_keys as configurable parameter
-            ignore_chunk_keys = ["bead2atom_idcs", "lvl_idcs_mask", "lvl_idcs_anchor_mask", "atom_pos"]
-            
+            ignore_chunk_keys = ["atom_pos"]
+
             for key in batch_.keys():
                 if key in [
                     AtomicDataDict.BATCH_KEY,
