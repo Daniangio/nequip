@@ -777,6 +777,7 @@ class NpzDataset(AtomicInMemoryDataset):
 
     def get_data(self):
 
+        print(self.raw_dir + "/" + self.raw_file_names[0])
         data = np.load(self.raw_dir + "/" + self.raw_file_names[0], allow_pickle=True)
 
         # only the keys explicitly mentioned in the yaml file will be parsed

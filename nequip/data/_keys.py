@@ -52,6 +52,7 @@ EDGE_FORCE_KEY: Final[str] = "edge_forces"
 
 NODE_FEATURES_KEY: Final[str] = "node_features"
 NODE_ATTRS_KEY: Final[str] = "node_attrs"
+EDGE_FEATURES: Final[str] = "edge_features"
 
 DATASET_INDEX_KEY: Final[str] = "dataset_idx"
 PER_ATOM_ENERGY_KEY: Final[str] = "atomic_energy"

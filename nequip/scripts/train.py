@@ -230,10 +230,12 @@ def fine_tune(config):
         if k == "fine_tuning_run_name":
             dictionary["run_name"] = config[k]
             logging.info(f'Update "run_name" to {dictionary["run_name"]}')
+            dictionary["n_train"] = None
+            dictionary["n_val"] = None
         elif config[k] != dictionary.get(k, ""):
             if k in [
-                "fine_tune", "dataset_list", "seed", "max_epochs", "loss_coeffs",
-                "wandb", "wandb_project", "log_batch_freq", "verbose", "append",
+                "fine_tune", "dataset_list", "validation_dataset_list", "seed", "max_epochs", "loss_coeffs",
+                "wandb", "wandb_project", "log_batch_freq", "verbose", "append", "keep_type_names",
                 "n_train", "n_val", "batch_size", "validation_batch_size",
                 "max_epochs", "learning_rate", "loss_coeffs", "device",
                 "optimizer_name", "optimizer_params", "metrics_components",
@@ -327,6 +329,9 @@ def restart(config):
                 dictionary[k] = config[k]
                 logging.info(f'Update "{k}" to {dictionary[k]}')
             elif k == "learning_rate":
+                dictionary[k] = config[k]
+                logging.info(f'Update "{k}" to {dictionary[k]}')
+            elif k == "metrics_components":
                 dictionary[k] = config[k]
                 logging.info(f'Update "{k}" to {dictionary[k]}')
             elif isinstance(config[k], type(dictionary.get(k, ""))):
