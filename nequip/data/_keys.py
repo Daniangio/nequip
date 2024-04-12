@@ -24,9 +24,9 @@ PBC_KEY: Final[str] = "pbc"
 # [n_atom, 1] long tensor
 ATOMIC_NUMBERS_KEY: Final[str] = "atomic_numbers"
 # [n_atom, 1] long tensor
-BEAD_NUMBERS_KEY: Final[str] = "bead_numbers"
-# [n_atom, 1] long tensor
 ATOM_TYPE_KEY: Final[str] = "atom_types"
+# [n_atom, 1] long tensor
+NODE_TYPE_KEY: Final[str] = "node_types"
 
 BASIC_STRUCTURE_KEYS: Final[List[str]] = [
     POSITIONS_KEY,
@@ -35,6 +35,7 @@ BASIC_STRUCTURE_KEYS: Final[List[str]] = [
     CELL_KEY,
     PBC_KEY,
     ATOM_TYPE_KEY,
+    NODE_TYPE_KEY,
     ATOMIC_NUMBERS_KEY,
 ]
 

@@ -24,12 +24,12 @@ class TypeMapper:
         keep_type_names: Optional[List[str]] = None,
         chemical_symbol_to_type: Optional[Dict[str, int]] = None,
         chemical_symbols: Optional[List[str]] = None,
-        using_bead_numbers: bool = False,
+        using_node_types: bool = False,
     ):
-        if using_bead_numbers:
+        if using_node_types:
             # check consistency
             assert type_names is not None, \
-            "When training on at least one dataset that uses bead_numbers as atom types, you have to provide type_names."
+            "When training on at least one dataset that uses node_types as atom types, you have to provide type_names."
         if chemical_symbols is not None:
             if chemical_symbol_to_type is not None:
                 raise ValueError(
@@ -64,7 +64,7 @@ class TypeMapper:
                 # Make sure they agree on types
                 # We already checked that chem->type is contiguous,
                 # so enough to check length since type_names is a list
-                if using_bead_numbers:
+                if using_node_types:
                     assert len(type_names) >= len(self.chemical_symbol_to_type)
                 else:
                     assert len(type_names) == len(self.chemical_symbol_to_type)
@@ -107,23 +107,23 @@ class TypeMapper:
     def __call__(
         self, data: Union[AtomicDataDict.Type, AtomicData], types_required: bool = True
     ) -> Union[AtomicDataDict.Type, AtomicData]:
-        if AtomicDataDict.BEAD_NUMBERS_KEY in data:
-            data[AtomicDataDict.ATOM_TYPE_KEY] = data[AtomicDataDict.BEAD_NUMBERS_KEY]
+        if AtomicDataDict.NODE_TYPE_KEY in data:
+            data[AtomicDataDict.ATOM_TYPE_KEY] = data[AtomicDataDict.NODE_TYPE_KEY]
             if AtomicDataDict.ATOMIC_NUMBERS_KEY not in data:
                 data[AtomicDataDict.ATOMIC_NUMBERS_KEY] = torch.zeros_like(
                     data[AtomicDataDict.ATOM_TYPE_KEY],
                     device=data[AtomicDataDict.ATOM_TYPE_KEY].device
                 )
                 # logging.warn(
-                #     "Data contained BEAD_NUMBERS_KEY but did not contain ATOMIC_NUMBERS_KEY; " +
+                #     "Data contained NODE_TYPE_KEY but did not contain ATOMIC_NUMBERS_KEY; " +
                 #     "Defaulting to beads of unspecified/mixed chemical species with atomic number 0."
                 # )
         if AtomicDataDict.ATOM_TYPE_KEY in data:
-            if AtomicDataDict.BEAD_NUMBERS_KEY in data:
-                del data[AtomicDataDict.BEAD_NUMBERS_KEY]
-                # logging.info(
-                #     "Data contained BEAD_NUMBERS_KEY; using bead numbers as atom types."
-                # )
+            if AtomicDataDict.NODE_TYPE_KEY in data:
+                del data[AtomicDataDict.NODE_TYPE_KEY]
+                logging.info(
+                    "Data contained NODE_TYPE_KEY; using node types as atom types."
+                )
             elif AtomicDataDict.ATOMIC_NUMBERS_KEY in data:
                 warnings.warn(
                     "Data contained both ATOM_TYPE_KEY and ATOMIC_NUMBERS_KEY; ignoring ATOMIC_NUMBERS_KEY"

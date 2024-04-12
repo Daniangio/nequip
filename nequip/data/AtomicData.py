@@ -29,8 +29,8 @@ PBC = Union[bool, Tuple[bool, bool, bool]]
 _DEFAULT_LONG_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_INDEX_KEY,
     AtomicDataDict.ATOMIC_NUMBERS_KEY,
-    AtomicDataDict.BEAD_NUMBERS_KEY,
     AtomicDataDict.ATOM_TYPE_KEY,
+    AtomicDataDict.NODE_TYPE_KEY,
     AtomicDataDict.BATCH_KEY,
 }
 _DEFAULT_NODE_FIELDS: Set[str] = {
@@ -38,8 +38,8 @@ _DEFAULT_NODE_FIELDS: Set[str] = {
     AtomicDataDict.NODE_FEATURES_KEY,
     AtomicDataDict.NODE_ATTRS_KEY,
     AtomicDataDict.ATOMIC_NUMBERS_KEY,
-    AtomicDataDict.BEAD_NUMBERS_KEY,
     AtomicDataDict.ATOM_TYPE_KEY,
+    AtomicDataDict.NODE_TYPE_KEY,
     AtomicDataDict.FORCE_KEY,
     AtomicDataDict.PER_ATOM_ENERGY_KEY,
     AtomicDataDict.BATCH_KEY,
@@ -258,10 +258,10 @@ class AtomicData(Data):
             ):
                 assert self.atomic_numbers.dtype in _TORCH_INTEGER_DTYPES
             if (
-                AtomicDataDict.BEAD_NUMBERS_KEY in self
-                and self.bead_numbers is not None
+                AtomicDataDict.NODE_TYPE_KEY in self
+                and self.node_types is not None
             ):
-                assert self.bead_numbers.dtype in _TORCH_INTEGER_DTYPES
+                assert self.node_types.dtype in _TORCH_INTEGER_DTYPES
             if "batch" in self and self.batch is not None:
                 assert self.batch.dim() == 2 and self.batch.shape[0] == self.num_nodes
                 # Check that there are the right number of cells
