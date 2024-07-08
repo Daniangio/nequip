@@ -93,6 +93,9 @@ def model_from_config(
                 raise RuntimeError(
                     f"All model_builders after the first one that returns a model must take the model as an argument; {builder.__name__} doesn't"
                 )
+        for pname in pnames:
+            if pname not in params and pname in config:
+                params[pname] = config[pname]
         model = builder(**params)
         if model is not None and not isinstance(model, GraphModuleMixin):
             raise TypeError(
